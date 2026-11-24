@@ -1,0 +1,83 @@
+# Shared defaults. Scale-specific files (small.yaml, full.yaml) extend this one.
+# The resolved config of every run is saved to <work_dir>/config.resolved.yaml (pre-registration).
+seed: 20261123
+
+paths:
+  kqapro_dir: data/kqapro            # kb.json, train.json, val.json (official KQA Pro release)
+  kilt_source: http://dl.fbaipublicfiles.com/KILT/kilt_knowledgesource.json   # or a local path
+  kilt_pages: data/kilt/kb_pages.jsonl                                        # pages of KB entities only
+  work_dir: runs/default
+
+llm:
+  default:                           # Qwen3.5-9B served by vLLM (scripts/serve_vllm.sh)
+    base_url: http://localhost:8000/v1
+    api_key: EMPTY
+    model: Qwen/Qwen3.5-9B
+    temperature: 0.7                 # model-card values for non-thinking (instruct) mode
+    top_p: 0.8
+    top_k: 20
+    presence_penalty: 1.5
+    max_tokens: 1024
+    enable_thinking: false
+    vllm_extras: true
+    concurrency: 32
+  challenger: {}
+  solver: {}
+  curator: {}
+  judge:                             # prefer a different model family (e.g. an API model) to avoid self-preference
+    temperature: 0.0
+    top_p: 1.0
+    presence_penalty: 0.0
+    max_tokens: 256
+
+docs:
+  max_words: 100                     # passage length
+
+region:
+  concept: human                     # biographies have the richest text support
+  n_a: 200                           # Exp 1 entities
+  n_b: 200                           # Exp 2 entities (need KQA Pro question coverage)
+  min_facts: 8
+  min_page_words: 150
+  min_questions_b: 3
+
+support:
+  audit_n: 50                        # human precision check of S (target precision >= 95%)
+
+defects:
+  rates: [0.1, 0.2, 0.3]             # dose-response; LLM conditions use main_rate only
+  main_rate: 0.3
+  seeds: [0]
+  delete_frac: 0.5
+  similar_frac: 0.5                  # share of type-consistent ("similar") corruptions
+
+paths_sampling:
+  n: 300                             # Mode A paths per seed (shared by all conditions)
+  n_sweep: 300                       # B0-only paths for the other rates
+  type_weights: {attr: 0.15, rel: 0.15, attr_qual: 0.05, rel_qual: 0.1, rel_attr: 0.3, rel_rel: 0.15, rel_relqual: 0.1}
+
+exp1:
+  evidence: {k_per_fact: 3, max_page_passages: 12}
+  probe: {k: 2}                      # C0 closed-book samples per fact
+  mode_a: {conditions: [B0, C1, C2, C3], samples: 1}
+  mode_b: {conditions: [C1, C2, C3], n_entities: 200, samples: 1}
+  gap_tasks: {max_per_entity: 2}
+  judge: {max_tasks: 1000}
+  solver: {n_per_condition: 100, k: 2, settings: [gw, gstar, closed], max_attempts: 2, fewshot_pool: 20000}
+  audit: {e3_n: 100, natural_n: 100}
+
+exp2:
+  pool_size: 1500                    # KQA Pro questions on region B entities run on G*
+  k: 4                               # Solver samples per question for stable labels
+  stable_hi: 0.75                    # stably correct: >= 3/4
+  stable_lo: 0.25                    # stably wrong:   <= 1/4
+  targets: {missing_fact: 150, wrong_fact: 150, non_kg: 150, invalid_task: 100, non_kg_offpath: 100, refer: 100}
+  variants: [gold, pipeline]         # answer key shown to the Curator (pipeline = Challenger key)
+  ablations: [full, no_traj, no_sandbox, no_docs, oracle]
+  ablation_n: 200                    # cases per ablation other than 'full'
+  samples: 3                         # Curator seeds for variant=gold, ablation=full
+  evidence_k: 6
+  locality_n: 100                    # neighbour questions per committed edit (program level)
+  solver_locality_edits: 20          # edits re-tested at Solver level
+  solver_locality_questions: 30      # neighbour questions per re-tested edit
+  oversample: 2.0                    # candidate cases generated per target case before validation

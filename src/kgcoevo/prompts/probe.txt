@@ -1,0 +1,9 @@
+### TASK: probe
+Answer from your own knowledge only. Do not explain.
+
+Entity: {{entity}}
+Question: what is the "{{key}}" of this entity?{{qualifier_note}}
+Give an entity name for relations, a date as YYYY-MM-DD (or YYYY if you only know the year),
+or a number. If there are several values, give the most likely one. If you do not know, answer "unknown".
+
+Return only a JSON object: {"answer": "<value>", "confidence": <number between 0 and 1>}

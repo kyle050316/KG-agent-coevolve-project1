@@ -1,0 +1,20 @@
+### TASK: judge_faithfulness
+You check whether a natural-language question faithfully expresses a knowledge-graph program.
+
+## Program (executed to obtain the answer key)
+{{description}}
+
+## Question
+{{question}}
+
+## Answer key
+{{answer}}
+
+A question is faithful only if ALL criteria hold:
+1. It starts from the same entity or entities as the program.
+2. It follows the same relations in the same order and asks for the same final attribute, name or qualifier.
+3. It adds no constraint and drops none, so the program's output answers it.
+4. It is unambiguous and answerable without seeing the program.
+5. It does not reveal the answer key.
+
+Return only a JSON object: {"faithful": true|false, "violations": [<criterion numbers>], "note": "<short>"}

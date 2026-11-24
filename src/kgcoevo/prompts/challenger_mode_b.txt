@@ -1,0 +1,24 @@
+### TASK: challenger_mode_b
+You audit one entity of a WORKING knowledge graph (KG) that may contain missing or wrong facts.
+
+## Entity
+{{entity}}
+
+## Facts about this entity (as subject) in the working KG
+{{kg_facts}}
+
+## Evidence available to you
+{{evidence}}
+
+## Instructions
+- Report facts about THIS entity (as subject) that the evidence states explicitly but the KG
+  either lacks ("missing") or stores with a different value ("conflict").
+- Use KG keys (relation or attribute names) from this list whenever possible: {{allowed_keys}}
+- For relations, the claimed value is the exact name of the other entity.
+- Dates as YYYY-MM-DD when the day is known, otherwise YYYY.
+- Every reported gap must cite its evidence item ({{cite_note}}).
+- Do not report anything the evidence does not state; do not use background knowledge.
+- If you find nothing, return an empty list.
+
+Return only a JSON object:
+{"gaps": [{"key": "<KG key>", "kg_value": "<value stored in the KG, or empty>", "claimed_value": "<value stated by the evidence>", "label": "missing|conflict", "evidence_id": "<id>", "quote": "<short quote>"}]}

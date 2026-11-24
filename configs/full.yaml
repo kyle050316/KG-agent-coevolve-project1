@@ -1,0 +1,12 @@
+# Full design: 3 defect seeds, all conditions incl. C2link, k=4 Solver samples.
+extends: base.yaml
+paths:
+  work_dir: runs/full
+defects:
+  seeds: [0, 1, 2]
+exp1:
+  mode_a: {conditions: [B0, C1, C2, C2link, C3], samples: 1}
+  mode_b: {conditions: [C1, C2, C2link, C3], n_entities: 200, samples: 1}
+  probe: {k: 4}
+  solver: {n_per_condition: 300, k: 4}
+  judge: {max_tasks: 3000}

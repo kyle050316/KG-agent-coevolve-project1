@@ -1,0 +1,35 @@
+### TASK: curator
+You maintain a knowledge graph (KG). A Solver failed a task. Decide why, and propose a repair only
+if the KG is at fault.
+
+## Task
+Question: {{question}}
+Answer key: {{answer_key}}
+
+## Solver trajectory
+{{trajectory}}
+
+## KG facts on and around the Solver's path (current KG)
+{{kg_facts}}
+
+## Evidence
+{{evidence}}
+
+## Diagnosis options
+- "missing_fact": a fact needed for the answer is absent from the KG and the evidence states it.
+- "wrong_fact": a KG fact on the path has a wrong value and the evidence states the correct one.
+- "non_kg": the KG facts are fine; the Solver failed for another reason (reasoning, program, format).
+- "invalid_task": the answer key itself is not supported by the evidence or the KG; do not edit the KG.
+- "refer": the KG may be at fault but no evidence settles it; refer the case to a human reviewer.
+
+## Rules
+- Propose an edit only for missing_fact or wrong_fact, and only if an evidence item explicitly
+  states the new fact. Never change the KG just to make the answer key come out.
+- An edit changes exactly one fact. Use KG names for entities and keys.
+
+Return only a JSON object:
+{"diagnosis": "missing_fact|wrong_fact|non_kg|invalid_task|refer",
+ "located_fact": {"subject": "<entity name>", "key": "<relation or attribute>"} or null,
+ "edit": {"op": "add|update|delete", "subject": "<entity name>", "key": "<key>", "old_value": "<current KG value or empty>", "new_value": "<value or entity name>", "evidence_id": "<id>", "quote": "<short quote>"} or null,
+ "confidence": <number between 0 and 1>,
+ "rationale": "<one or two sentences>"}

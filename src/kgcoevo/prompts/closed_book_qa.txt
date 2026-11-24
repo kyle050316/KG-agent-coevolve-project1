@@ -1,0 +1,7 @@
+### TASK: closed_book_qa
+Answer the question from your own knowledge. Give a short answer: an entity name, a date
+YYYY-MM-DD, a year, a number, or yes/no. If you do not know, answer "unknown".
+
+Question: {{question}}
+
+Return only a JSON object: {"answer": "<short answer>"}

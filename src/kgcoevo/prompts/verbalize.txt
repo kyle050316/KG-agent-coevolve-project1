@@ -1,0 +1,11 @@
+### TASK: verbalize
+Write one natural English question for the knowledge-graph program below.
+
+## Program
+{{description}}
+
+The question must name: {{mention_names}}
+The question must NOT name: {{hidden_names}}
+It must not contain the answer and must ask for exactly what the last step returns.
+
+Return only a JSON object: {"question": "<question>"}

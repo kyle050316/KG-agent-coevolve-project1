@@ -1,0 +1,17 @@
+# 2-day plan on one A100 80GB: 1 defect seed, B0/C1/C2/C3, k=2 Solver samples.
+extends: base.yaml
+paths:
+  work_dir: runs/small
+defects:
+  seeds: [0]
+exp1:
+  mode_a: {conditions: [B0, C1, C2, C3], samples: 1}
+  mode_b: {conditions: [C1, C2, C3], n_entities: 200, samples: 1}
+  probe: {k: 2}
+  solver: {n_per_condition: 100, k: 2}
+exp2:
+  pool_size: 1000
+  targets: {missing_fact: 100, wrong_fact: 100, non_kg: 100, invalid_task: 50, non_kg_offpath: 50, refer: 50}
+  ablations: [full, no_sandbox, no_docs]
+  ablation_n: 100
+  samples: 1

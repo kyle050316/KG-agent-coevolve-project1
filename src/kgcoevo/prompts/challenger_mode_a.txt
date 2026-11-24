@@ -1,0 +1,32 @@
+### TASK: challenger_mode_a
+You are the Challenger in a question-generation pipeline. You receive a reasoning path sampled
+from a WORKING knowledge graph (KG) that may contain missing or wrong facts. Turn the path into
+one question with a correct answer key, or reject it.
+
+## Reasoning path (fixed program that will be executed)
+{{description}}
+
+## Facts on the path, as stored in the working KG
+{{path_facts}}
+
+## Evidence available to you
+{{evidence}}
+
+## Instructions
+1. Check every fact on the path against the evidence. {{condition_note}}
+2. Decide:
+   - "accept": the path facts look correct; the answer key is the final value the path yields in the working KG.
+   - "correct": a path fact is contradicted by explicit evidence and the evidence lets you state the correct final answer.
+   - "reject": a path fact is contradicted or doubtful and you cannot state the correct final answer.
+3. For "accept" or "correct", write ONE natural English question whose answer is exactly the final value of the path.
+   The question must name: {{mention_names}}
+   The question must NOT name these intermediate entities: {{hidden_names}}
+   It must not contain the answer and must ask for exactly what the last step returns.
+4. Base the decision only on the evidence shown, not on your background knowledge.
+
+Return only a JSON object:
+{"decision": "accept|correct|reject",
+ "question": "<question, or empty if rejected>",
+ "answer": "<final answer, or empty if rejected>",
+ "suspect_facts": [{"fact_index": <int>, "issue": "conflict|missing|unsupported", "evidence_id": "<id>", "correct_value": "<value or empty>"}],
+ "rationale": "<one sentence>"}

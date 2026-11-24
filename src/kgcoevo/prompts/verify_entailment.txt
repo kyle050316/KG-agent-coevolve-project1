@@ -1,0 +1,9 @@
+### TASK: verify_entailment
+Passage:
+"""{{passage}}"""
+
+Claim: {{claim}}
+
+Does the passage explicitly state the claim (entailment, not mere compatibility)? Use only the passage.
+
+Return only a JSON object: {"entails": true|false, "quote": "<supporting span, or empty>"}

@@ -1,0 +1,13 @@
+### TASK: solver_answer
+Question: {{question}}
+
+You ran this program on the knowledge base (KB):
+{{program}}
+
+Execution result: {{result}}
+{{passages}}
+Give the final short answer (an entity name, a date YYYY-MM-DD, a year, a number, or yes/no).
+Use the KB result when it is non-empty. If it is empty or an error, use the passages if they
+answer the question; otherwise answer from your own knowledge (source "memory") or say "unknown".
+
+Return only a JSON object: {"answer": "<short answer>", "source": "kg|text|memory|unknown"}

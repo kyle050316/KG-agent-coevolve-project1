@@ -1,0 +1,37 @@
+### TASK: solver_parse
+Translate the question into a KoPL program that will be executed on a knowledge base (KB).
+
+## KoPL functions (each step takes the output of the previous step; a second Find starts a new branch)
+Find(name)                         entities with this exact name
+FindAll()                          all entities
+FilterConcept(concept)             keep entities that belong to a concept (e.g. "human")
+Relate(relation, direction)        follow a relation; direction is "forward" (entity is subject) or "backward"
+FilterStr(key, value) / FilterNum(key, value, op) / FilterYear(key, value, op) / FilterDate(key, value, op)
+                                   keep entities whose attribute satisfies op in {=, !=, <, >}
+QFilterStr(qkey, qvalue) / QFilterNum|QFilterYear|QFilterDate(qkey, qvalue, op)
+                                   keep facts from the previous Relate/Filter whose qualifier matches
+And() / Or()                       intersect / unite the two most recent branches
+QueryName()                        names of the entities
+QueryAttr(key)                     attribute values
+QueryAttrUnderCondition(key, qkey, qvalue)   attribute value under a qualifier condition
+QueryAttrQualifier(key, value, qkey)         qualifier of the attribute fact key=value
+QueryRelation()                    relation between the entities of the two branches
+QueryRelationQualifier(relation, qkey)       qualifier of the relation between the two branches
+Count()                            number of entities
+SelectBetween(key, op)             of two branches, the entity with the greater/less attribute (op: greater|less)
+SelectAmong(key, op)               entity with the largest/smallest attribute (op: largest|smallest)
+VerifyStr(value) / VerifyNum(value, op) / VerifyYear(value, op) / VerifyDate(value, op)   yes/no
+
+## Entities found in the question (exact KB names and their concepts)
+{{entities}}
+
+## Relations and attributes available around these entities
+{{schema}}
+
+## Examples
+{{examples}}
+{{feedback}}
+## Question
+{{question}}
+
+Return only a JSON object: {"program": [{"function": "<name>", "inputs": ["<arg>", ...]}, ...]}
