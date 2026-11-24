@@ -9,7 +9,7 @@ Stages
   paths     sample Mode A paths on Gw, annotate exposure / answer-affecting / G* answers
   probe     closed-book probe items (C0) for every supported fact of region A
 
-Usage:  python -m experiments.exp1.prepare --config configs/exp1_2day.yaml [--stages ...]
+Usage:  python -m experiments.exp1.prepare --config configs/main.yaml [--stages ...]
 """
 
 from __future__ import annotations
@@ -134,6 +134,9 @@ def stage_paths(ctx: Context) -> None:
 
 
 def stage_probe(ctx: Context) -> None:
+    if not ctx.cfg["exp1"]["probe"].get("enabled", True):
+        print("[probe] C0 closed-book probe disabled (exp1.probe.enabled=false)")
+        return
     items = []
     A = set(ctx.region["A"])
     for r in ctx.support:

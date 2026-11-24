@@ -9,7 +9,7 @@ Stages (run in this order; every stage is resumable):
   judge      LLM-judge faithfulness (E3) on rule-valid tasks
   solver     Solver on Gw / G* / closed-book for a sample of valid tasks
 
-Usage:  python -m experiments.exp1.run --config configs/exp1_2day.yaml --stages mode_a mode_b
+Usage:  python -m experiments.exp1.run --config configs/main.yaml --stages mode_a mode_b
 """
 
 from __future__ import annotations
@@ -55,6 +55,9 @@ def builder(ctx: Context, seed: int) -> EvidenceBuilder:
 
 
 async def stage_probe(ctx: Context) -> None:
+    if not E(ctx)["probe"].get("enabled", True):
+        print("[probe] C0 closed-book probe disabled (exp1.probe.enabled=false)")
+        return
     llm = ctx.llm("challenger")
     k = E(ctx)["probe"]["k"]
     items = [{**it, "j": j} for it in read_jsonl(ctx.data / "probe_items.jsonl") for j in range(k)]

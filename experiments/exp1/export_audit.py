@@ -7,7 +7,7 @@
 After labelling, save the filled sheet as audit/e3_audit_labels.csv; `analyze` then reports
 inter-annotator kappa and the judge's accuracy against the human majority.
 
-Usage:  python -m experiments.exp1.export_audit --config configs/exp1_2day.yaml
+Usage:  python -m experiments.exp1.export_audit --config configs/main.yaml
 """
 
 from __future__ import annotations

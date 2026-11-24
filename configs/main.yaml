@@ -1,0 +1,4 @@
+# Main run of the simplified design (all values in base.yaml). Exp 1 and Exp 2 share one work dir.
+extends: base.yaml
+paths:
+  work_dir: runs/main

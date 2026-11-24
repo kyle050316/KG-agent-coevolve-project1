@@ -1,11 +1,13 @@
-"""Curator: failure attribution and KG repair (Exp 2).
+"""Curator: failure attribution and KG repair (Exp 2), prompt-based with a counterfactual tool.
 
-Flow per case (Fig. "Solver failure -> compare path facts with documents -> ..."):
-1. diagnose: missing_fact | wrong_fact | non_kg | invalid_task | refer, with the located fact;
-2. for KG diagnoses, turn the proposed edit into an :class:`Edit` on the current KG;
-3. commit only if (a) the edit cites an evidence item that was shown, (b) an independent verifier
-   says that item entails the edited fact, and (c) the Solver succeeds in the sandbox re-run.
-   "Re-run succeeds but unsupported" edits are counted as reward-hacking candidates.
+Flow per flagged case:
+1. ``diagnose`` (prompt): missing_fact | wrong_fact | non_kg, the located fact, and a single-fact edit;
+2. tool (optional, ablation ``no_tool`` skips it): the edit is applied to a sandbox copy of the KG,
+   the Solver's program is re-executed and the Solver re-answers; the result goes back to the model;
+3. ``decide`` (prompt): commit, revise or withdraw. The re-run is information, not a gate, because a
+   correct edit does not fix a wrong Solver program;
+4. source gate (as in the proposal): an edit is admitted only if it cites an evidence item that was
+   shown and an independent verifier confirms that the item states the new fact.
 """
 
 from __future__ import annotations
@@ -16,9 +18,9 @@ import re
 from kgcoevo.kb.executor import Executor
 from kgcoevo.kb.store import Edit
 from kgcoevo.llm.parsing import extract_json
-from kgcoevo.llm.prompts import messages
+from kgcoevo.llm.prompts import messages, render
 
-DIAGNOSES = ("missing_fact", "wrong_fact", "non_kg", "invalid_task", "refer")
+DIAGNOSES = ("missing_fact", "wrong_fact", "non_kg")
 
 
 def vc_to_raw(vc) -> dict:
@@ -137,38 +139,72 @@ def render_trajectory(traj: dict | None, store) -> str:
     return "\n".join(lines)
 
 
-async def diagnose(llm, *, question: str, answer_key: str, trajectory: str, kg_facts: str, evidence: str,
-                   seed: int | None = None) -> dict:
-    raw = await llm.chat(messages("curator", question=question, answer_key=answer_key, trajectory=trajectory,
-                                  kg_facts=kg_facts, evidence=evidence), seed=seed)
+async def diagnose(llm, *, question: str, answer_key: str, trigger: str, trajectory: str, kg_facts: str,
+                   evidence: str, seed: int | None = None) -> dict:
+    msgs = messages("curator", question=question, answer_key=answer_key, trigger=trigger, trajectory=trajectory,
+                    kg_facts=kg_facts, evidence=evidence)
+    raw = await llm.chat(msgs, seed=seed)
     js = extract_json(raw) or {}
     d = str(js.get("diagnosis", "")).strip().lower()
     return {"diagnosis": d if d in DIAGNOSES else "invalid", "located_fact": js.get("located_fact"),
-            "edit": js.get("edit"), "confidence": js.get("confidence"), "rationale": js.get("rationale", ""),
-            "parse_ok": bool(js), "raw": raw}
+            "edit": js.get("edit") if isinstance(js.get("edit"), dict) else None, "confidence": js.get("confidence"),
+            "rationale": js.get("rationale", ""), "parse_ok": bool(js), "raw": raw, "_messages": msgs}
+
+
+async def decide(llm, first: dict, tool_result: str, seed: int | None = None) -> dict:
+    """Second turn: the model sees the sandbox result of its own edit and commits, revises or withdraws."""
+    msgs = first["_messages"] + [{"role": "assistant", "content": first["raw"]},
+                                 {"role": "user", "content": render("curator_decide", tool_result=tool_result)}]
+    raw = await llm.chat(msgs, seed=seed)
+    js = extract_json(raw) or {}
+    dec = str(js.get("decision", "")).strip().lower()
+    d = str(js.get("diagnosis", "")).strip().lower()
+    return {"decision": dec if dec in ("commit", "revise", "withdraw") else "invalid",
+            "diagnosis": d if d in DIAGNOSES else first["diagnosis"],
+            "edit": js.get("edit") if isinstance(js.get("edit"), dict) else None,
+            "rationale": js.get("rationale", ""), "parse_ok": bool(js), "raw": raw}
+
+
+def live_neighbors(executor: Executor, edits: list[Edit] | None, eids: list[str]) -> set[str]:
+    """``eids`` and their neighbours on the current (patched) KG, so retrieval never follows a deleted link."""
+    kb = executor.kb
+    out = set(eids)
+    with executor.patched(edits):
+        for e in eids:
+            ent = kb.entities.get(e)
+            if not ent:
+                continue
+            for i, r in enumerate(ent["relations"]):
+                if r["object"] in kb.entities and i in kb.relation_inv_index.get((r["relation"], r["direction"]), {}).get(e, []):
+                    out.add(r["object"])
+    return out
 
 
 def live_facts_text(executor: Executor, edits: list[Edit] | None, eids: list[str], names: dict[str, str],
-                    per_entity: int = 25) -> str:
-    """Current facts (attrs + outgoing relations, with qualifiers) of ``eids`` on the patched KG."""
+                    per_entity: int = 40, focus_keys: set[str] | None = None) -> str:
+    """Current facts (attrs + outgoing relations, with qualifiers) of ``eids`` on the patched KG.
+
+    Facts whose key appears in ``focus_keys`` (keys used by the Solver's program) are listed first, so
+    the per-entity cap never hides them.
+    """
     kb = executor.kb
+    focus = focus_keys or set()
     lines = []
     with executor.patched(edits):
         for e in eids:
             ent = kb.entities.get(e)
             if not ent:
                 continue
-            n = 0
+            rows = []
             for i, a in enumerate(ent["attributes"]):
-                if n < per_entity and i in kb.attribute_inv_index.get(a["key"], {}).get(e, []):
+                if i in kb.attribute_inv_index.get(a["key"], {}).get(e, []):
                     q = "; ".join(f"{k}: {', '.join(str(v) for v in vs)}" for k, vs in a["qualifiers"].items())
-                    lines.append(f"{ent['name']} | {a['key']}: {a['value']}" + (f" ({q})" if q else ""))
-                    n += 1
+                    rows.append((a["key"], f"{ent['name']} | {a['key']}: {a['value']}" + (f" ({q})" if q else "")))
             for i, r in enumerate(ent["relations"]):
-                if (n < per_entity and r["direction"] == "forward"
-                        and i in kb.relation_inv_index.get((r["relation"], "forward"), {}).get(e, [])):
+                if r["direction"] == "forward" and i in kb.relation_inv_index.get((r["relation"], "forward"), {}).get(e, []):
                     q = "; ".join(f"{k}: {', '.join(str(v) for v in vs)}" for k, vs in r["qualifiers"].items())
-                    lines.append(f"{ent['name']} --{r['relation']}--> {names.get(r['object'], r['object'])}"
-                                 + (f" ({q})" if q else ""))
-                    n += 1
+                    rows.append((r["relation"], f"{ent['name']} --{r['relation']}--> {names.get(r['object'], r['object'])}"
+                                 + (f" ({q})" if q else "")))
+            rows.sort(key=lambda x: x[0] not in focus)  # stable: original order within each group
+            lines += [t for _, t in rows[:per_entity]]
     return "\n".join(lines) or "(no facts)"

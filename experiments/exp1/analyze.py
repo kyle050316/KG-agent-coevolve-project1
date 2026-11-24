@@ -5,7 +5,7 @@ Outputs (in <work_dir>/results/):
   exp1_summary.json  all numbers
   exp1_*.csv         per-item tables for further analysis
 
-Usage:  python -m experiments.exp1.analyze --config configs/exp1_2day.yaml
+Usage:  python -m experiments.exp1.analyze --config configs/main.yaml
 """
 
 from __future__ import annotations

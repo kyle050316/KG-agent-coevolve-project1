@@ -1,0 +1,20 @@
+# Optional extensions, if time allows after the main run: B0 dose-response over defect rates,
+# C2link and C0 (closed-book probe) in Exp 1, a second Curator seed and the no_docs ablation in Exp 2.
+# Run with the "probe" stage added (prepare and exp1). Uses its own work dir.
+extends: base.yaml
+paths:
+  work_dir: runs/extended
+defects:
+  rates: [0.1, 0.2, 0.3]
+paths_sampling:
+  n: 300
+exp1:
+  probe: {enabled: true, k: 2}
+  mode_a: {conditions: [B0, C1, C2, C2link, C3], samples: 1}
+  mode_b: {conditions: [C1, C2, C2link, C3], n_entities: 200, samples: 1}
+  solver: {n_per_condition: 100, k: 4}
+exp2:
+  pool_size: 1500
+  targets: {missing_fact: 150, wrong_fact: 150, non_kg: 150}
+  ablations: [full, no_tool, no_docs]
+  samples: 2

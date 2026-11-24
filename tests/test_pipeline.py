@@ -17,6 +17,16 @@ from kgcoevo.runner import read_jsonl
 from tests.fixtures.mini import QUESTIONS, make_kb, make_kilt_pages
 
 
+# Mock Solver behaviour that produces every Exp 2 case type on the fixture:
+# MEMORY      answered from memory when the KG execution fails (silent KG cases / ungrounded non-KG cases)
+# UNGROUNDED  the mock parses a wrong program (non_kg/ungrounded: right answer, KG not used)
+# WRONG       the mock gives a wrong final answer (non_kg/wrong)
+MEMORY = {"When was Barack Obama born?": "1961-08-04", "When was the spouse of Michelle Obama born?": "1961-08-04",
+          "Is Barack Obama male?": "yes"}
+UNGROUNDED = {"Is Barack Obama male?"}
+WRONG = {"Where was Michelle Obama born?": "Honolulu"}
+
+
 class Script:
     def __init__(self):
         self.paths = {}  # description -> path record
@@ -59,14 +69,22 @@ class Script:
                 for p in self.paths.values():
                     if p["path_id"] == m.group(1):
                         return json.dumps({"program": p["program"]})
-            return json.dumps({"program": self.programs.get(q, [{"function": "Find", "inputs": ["Nobody"]}, {"function": "QueryName", "inputs": []}])})
+            wrong = [{"function": "Find", "inputs": ["Nobody"]}, {"function": "QueryName", "inputs": []}]
+            return json.dumps({"program": wrong if q in UNGROUNDED else self.programs.get(q, wrong)})
         if t == "solver_answer":
+            q = text.split("Question: ")[1].split("\n")[0].strip()
             res = text.split("Execution result: ")[1].split("\n")[0]
             try:
                 vals = json.loads(res)
-                return json.dumps({"answer": vals[0] if vals else "unknown", "source": "kg"})
             except json.JSONDecodeError:
-                return json.dumps({"answer": "unknown", "source": "unknown"})
+                vals = []
+            if q in WRONG:
+                return json.dumps({"answer": WRONG[q], "source": "kg"})
+            if vals:
+                return json.dumps({"answer": vals[0], "source": "kg"})
+            if q in MEMORY:
+                return json.dumps({"answer": MEMORY[q], "source": "memory"})
+            return json.dumps({"answer": "unknown", "source": "unknown"})
         if t == "closed_book_qa":
             return json.dumps({"answer": "unknown"})
         if t == "curator":
@@ -74,9 +92,18 @@ class Script:
             ev = pids[0] if pids else "REF"
             if "Melania" in text:
                 return json.dumps({"diagnosis": "non_kg", "located_fact": None, "edit": None})
-            return json.dumps({"diagnosis": "missing_fact", "located_fact": {"subject": "Barack Obama", "key": "date of birth"},
-                               "edit": {"op": "add", "subject": "Barack Obama", "key": "date of birth", "old_value": "",
-                                        "new_value": "1961-08-04", "evidence_id": ev}, "confidence": 0.8})
+            cur = re.search(r"Barack Obama \| date of birth: (\S+)", text)
+            edit = {"op": "update" if cur else "add", "subject": "Barack Obama", "key": "date of birth",
+                    "old_value": cur.group(1) if cur else "", "new_value": "1961-08-04", "evidence_id": ev}
+            return json.dumps({"diagnosis": "wrong_fact" if cur else "missing_fact",
+                               "located_fact": {"subject": "Barack Obama", "key": "date of birth"}, "edit": edit, "confidence": 0.8})
+        if t == "curator_decide":
+            first = json.loads(msgs[-2]["content"])
+            if "matches the answer key: yes" in text:
+                return json.dumps({"decision": "commit", "diagnosis": first["diagnosis"], "edit": None})
+            if "could not be applied" in text:
+                return json.dumps({"decision": "withdraw", "diagnosis": "non_kg", "edit": None})
+            return json.dumps({"decision": "revise", "diagnosis": first["diagnosis"], "edit": first["edit"]})
         if t == "verify_entailment":
             return json.dumps({"entails": True})
         raise AssertionError(f"unexpected task {t}")
@@ -99,8 +126,9 @@ def _make_run(d, mutate=None):
     cfg["exp1"]["mode_b"].update({"conditions": ["C1", "C2", "C3"], "n_entities": 2})
     cfg["exp1"]["solver"].update({"n_per_condition": 5, "k": 2, "fewshot_pool": 100})
     cfg["exp1"]["audit"] = {"e3_n": 6, "natural_n": 5}
-    cfg["exp2"].update({"pool_size": 50, "k": 2, "ablation_n": 6, "samples": 1, "locality_n": 10, "solver_locality_edits": 2,
-                        "targets": {"missing_fact": 3, "wrong_fact": 3, "non_kg": 2, "invalid_task": 2, "non_kg_offpath": 2, "refer": 2}})
+    cfg["exp1"]["probe"]["enabled"] = True
+    cfg["exp2"].update({"pool_size": 50, "k": 2, "ablation_n": 6, "samples": 2, "locality_n": 10, "solver_locality_edits": 2,
+                        "ablations": ["full", "no_tool", "no_docs"], "targets": {"missing_fact": 3, "wrong_fact": 3, "non_kg": 2}})
     if mutate:
         mutate(cfg)
     (d / "cfg.yaml").write_text(yaml.safe_dump(cfg))
@@ -155,16 +183,28 @@ def test_end_to_end(run_dir, capsys):
     build_cases.main(llms, _args(run_dir, ["all"]))
     cases = read_jsonl(run_dir / "run" / "exp2" / "cases.jsonl")
     assert cases and {c["cls"] for c in cases} & {"missing_fact", "wrong_fact"}
+    assert {c["cls"] for c in cases} <= {"missing_fact", "wrong_fact", "non_kg"}
+    assert all(c["traj"] for c in cases if c["t1"] or c["t2"])
+    kinds = {(c["cls"], c["subtype"]) for c in cases}
+    assert ("non_kg", "wrong") in kinds and ("non_kg", "ungrounded") in kinds, kinds
+    assert any(c["t2"] and not c["t1"] for c in cases if c["cls"] != "non_kg"), "a silent KG case (T2 only)"
     r2.main(llms, _args(run_dir, ["all"]))
     cur = read_jsonl(run_dir / "run" / "exp2" / "curator.jsonl")
     assert cur and all("error" not in r for r in cur), [r.get("error") for r in cur if "error" in r][:3]
+    assert {r["ablation"] for r in cur} == {"full", "no_tool", "no_docs"}
+    assert all(r["tool"] is None and r["second"] is None for r in cur if r["ablation"] == "no_tool")
+    assert any(r["second"] for r in cur if r["ablation"] == "full"), "the tool turn ran"
+    assert not any(r["admitted"] for r in cur if r["ablation"] == "no_docs"), "no evidence -> nothing admitted"
+    assert any(r["admitted"] for r in cur)
     a2.main()
     rep2 = (run_dir / "run" / "results" / "exp2_report.md").read_text()
-    assert "Gate behaviour" in rep2 and "Locality" in rep2
+    for section in ("Cases and trigger coverage", "Diagnosis and repair", "End-to-end", "Counterfactual tool",
+                    "Paired ablations", "Source gate", "Locality", "Baselines"):
+        assert section in rep2, section
 
 
 def test_exp1_minimal_config(tmp_path):
-    """configs/exp1_min.yaml shape: one rate, B0/C1/C2/C3, no C0 probe, no closed-book Solver setting."""
+    """Main-config shape of Exp 1: one rate, B0/C1/C2/C3, no C0 probe, no closed-book Solver setting."""
     import sys
 
     from experiments.exp1 import analyze as a1, prepare, run as r1
@@ -175,6 +215,7 @@ def test_exp1_minimal_config(tmp_path):
         cfg["defects"].update({"rates": [0.6], "main_rate": 0.6})
         cfg["exp1"]["mode_a"]["conditions"] = ["B0", "C1", "C2", "C3"]
         cfg["exp1"]["solver"]["settings"] = ["gw", "gstar"]
+        cfg["exp1"]["probe"]["enabled"] = False
 
     d = _make_run(tmp_path, mutate)
     sys.argv = ["prepare", "--config", str(d / "cfg.yaml"), "--stages", "kilt", "region", "passages", "support",
@@ -184,7 +225,7 @@ def test_exp1_minimal_config(tmp_path):
     for p in Context(load_config(d / "cfg.yaml")).paths(0.6, 0):
         script.paths[p["description"]] = p
     llms = {r: MockLLM(script, r) for r in ("challenger", "solver", "curator", "judge")}
-    r1.main(llms, _args(d, ["mode_a", "mode_b", "gap_tasks", "checks", "judge", "solver"]))
+    r1.main(llms, _args(d, ["probe", "mode_a", "mode_b", "gap_tasks", "checks", "judge", "solver"]))
     assert not (d / "run" / "exp1" / "probe.jsonl").exists()
     sys.argv = ["x", "--config", str(d / "cfg.yaml")]
     a1.main()

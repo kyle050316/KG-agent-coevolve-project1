@@ -1,4 +1,5 @@
-# Shared defaults. Scale-specific files (small.yaml, full.yaml) extend this one.
+# Shared defaults = the simplified main design (configs/main.yaml only sets the work dir).
+# pilot.yaml shrinks it for a smoke test on real data; extended.yaml adds the optional parts.
 # The resolved config of every run is saved to <work_dir>/config.resolved.yaml (pre-registration).
 seed: 20261123
 
@@ -45,39 +46,41 @@ support:
   audit_n: 50                        # human precision check of S (target precision >= 95%)
 
 defects:
-  rates: [0.1, 0.2, 0.3]             # dose-response; LLM conditions use main_rate only
+  rates: [0.3]                       # one defect rate (extended.yaml adds a B0 dose-response)
   main_rate: 0.3
   seeds: [0]
   delete_frac: 0.5
   similar_frac: 0.5                  # share of type-consistent ("similar") corruptions
 
 paths_sampling:
-  n: 300                             # Mode A paths per seed (shared by all conditions)
-  n_sweep: 300                       # B0-only paths for the other rates
+  n: 200                             # Mode A paths per seed (shared by all conditions)
+  n_sweep: 300                       # B0-only paths for other rates (only if rates has more than one value)
   type_weights: {attr: 0.15, rel: 0.15, attr_qual: 0.05, rel_qual: 0.1, rel_attr: 0.3, rel_rel: 0.15, rel_relqual: 0.1}
 
 exp1:
+  # C1 = KG only, C2 = KG + documents, C3 = KG + reference KG. B0 = no-LLM template baseline (free).
+  # Optional (extended.yaml): C2link (documents with entity links) and C0 (closed-book probe).
   evidence: {k_per_fact: 3, max_page_passages: 12}
-  probe: {k: 2}                      # C0 closed-book samples per fact
+  probe: {enabled: false, k: 2}      # C0 closed-book probe
   mode_a: {conditions: [B0, C1, C2, C3], samples: 1}
-  mode_b: {conditions: [C1, C2, C3], n_entities: 200, samples: 1}
-  gap_tasks: {max_per_entity: 2}
-  judge: {max_tasks: 1000}
-  solver: {n_per_condition: 100, k: 2, settings: [gw, gstar, closed], max_attempts: 2, fewshot_pool: 20000}
-  audit: {e3_n: 100, natural_n: 100}
+  mode_b: {conditions: [C1, C2, C3], n_entities: 100, samples: 1}
+  gap_tasks: {max_per_entity: 1}
+  judge: {max_tasks: 600}
+  solver: {n_per_condition: 50, k: 2, settings: [gw, gstar, closed], max_attempts: 2, fewshot_pool: 20000}
+  audit: {e3_n: 60, natural_n: 50}
 
 exp2:
-  pool_size: 1500                    # KQA Pro questions on region B entities run on G*
-  k: 4                               # Solver samples per question for stable labels
+  # Three classes: missing_fact, wrong_fact (one sandboxed defect on a gold-path fact) and non_kg.
+  # Triggers: T1 = Solver answer stably wrong; T2 = Solver KG execution stably misses the answer key.
+  pool_size: 1000                    # KQA Pro questions on region B entities run on G*
+  k: 4                               # Solver samples per question / case for stable labels
   stable_hi: 0.75                    # stably correct: >= 3/4
   stable_lo: 0.25                    # stably wrong:   <= 1/4
-  targets: {missing_fact: 150, wrong_fact: 150, non_kg: 150, invalid_task: 100, non_kg_offpath: 100, refer: 100}
-  variants: [gold, pipeline]         # answer key shown to the Curator (pipeline = Challenger key)
-  ablations: [full, no_traj, no_sandbox, no_docs, oracle]
-  ablation_n: 200                    # cases per ablation other than 'full'
-  samples: 3                         # Curator seeds for variant=gold, ablation=full
+  targets: {missing_fact: 100, wrong_fact: 100, non_kg: 100}
+  ablations: [full, no_tool]         # full = diagnose -> sandbox re-run as a tool -> commit/revise/withdraw
+  ablation_n: 100                    # stratified cases for ablations other than full
+  samples: 1                         # Curator seeds for the full ablation
   evidence_k: 6
-  locality_n: 100                    # neighbour questions per committed edit (program level)
-  solver_locality_edits: 20          # edits re-tested at Solver level
+  locality_n: 100                    # neighbour questions per admitted edit (program level, exact)
+  solver_locality_edits: 20          # admitted edits re-tested at Solver level
   solver_locality_questions: 30      # neighbour questions per re-tested edit
-  oversample: 2.0                    # candidate cases generated per target case before validation
