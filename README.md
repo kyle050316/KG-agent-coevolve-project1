@@ -188,10 +188,24 @@ bash scripts/run_exp1_min.sh run paths.work_dir=/content/drive/MyDrive/kgcoevo/e
 * An A100 runtime consumes compute units from the moment it is connected. Run `prepare` on a CPU runtime and
   stop the GPU runtime as soon as the run finishes.
 
+### Two-day plan (`configs/two_day.yaml`): minimal Exp 1 + reduced Exp 2
+
+Both experiments share one work dir, because Exp 2 uses Exp 1 tasks for its invalid_task cases.
+Exp 2's pool does not depend on Exp 1, so it runs at the same time against the same vLLM server.
+
+```bash
+W="paths.work_dir=/content/drive/MyDrive/kgcoevo/two_day"
+bash scripts/run_two_day.sh prepare $W                 # CPU, ~30-60 min (KILT streaming)
+bash scripts/run_two_day.sh exp1 $W &                  # ~1.2 GPU-h
+bash scripts/run_two_day.sh pool $W; wait              # ~3 GPU-h, in parallel with exp1
+bash scripts/run_two_day.sh exp2 $W                    # ~4.5 GPU-h: cases, Curator, locality, analysis
+```
+
 ### Configs
 
 | File | Use |
 |---|---|
+| `configs/two_day.yaml` | minimal Exp 1 + reduced Exp 2 (targets 100/100/100/50/50/50, ablations full/no_sandbox/no_docs) |
 | `configs/exp1_min.yaml` | Exp 1 only, C1/C2/C3 (+ free B0), one rate and seed, about 1.2 GPU-h |
 | `configs/small.yaml` | 2-day plan: 1 defect seed, B0/C1/C2/C3, Solver k=2, smaller Exp 2 |
 | `configs/full.yaml` | full design: 3 seeds, + C2link, Solver k=4, larger audits |
