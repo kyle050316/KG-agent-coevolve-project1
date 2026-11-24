@@ -113,11 +113,14 @@ def mode_a_records(ctx: Context, known: dict[str, bool]) -> dict[str, list[dict]
         dec = r["decision"]
         emitted = dec in ("accept", "correct")
         key_ok = bool(emitted and len(p["gs_answers"]) == 1 and match_any(r["answer"], p["gs_answers"]))
+        # what counts is the emitted key: "correct" with the Gw answer unchanged is in effect an accept
+        changed = bool(emitted and not answers_equal(r["answer"], p["answer_gw"]))
+        eff = {"accept": "keep", "correct": "fix" if changed else "keep"}.get(dec, dec)  # keep|fix|reject|invalid
         group = p.get("group") or ("defective" if p["answer_affecting"] else "clean")
         if not emitted or key_ok:
             cause = ""
         elif group == "defective":
-            cause = "defect passed" if dec == "accept" else "failed fix"
+            cause = "defect passed" if not changed else "failed fix"
         else:
             cause = "introduced"
         ds = [defects[r["seed"]][i] for i in p.get("defect_ids", []) if i in defects[r["seed"]]]
@@ -125,8 +128,9 @@ def mode_a_records(ctx: Context, known: dict[str, bool]) -> dict[str, list[dict]
         out[r["condition"]].append({
             "seed": r["seed"], "path_id": r["path_id"], "j": r["j"], "group": group, "ptype": p["ptype"],
             "hops": p["hops"], "anchor": p["anchor"], "stratum": strata.get(p["anchor"], "?"), "decision": dec,
+            "eff": eff, "flagged_kept": dec == "correct" and not changed,
             "emitted": emitted, "key_ok": key_ok, "cause": cause,
-            "grounded": bool(dec == "correct" and _in_text(r["answer"], r.get("evidence_text", ""))),
+            "grounded": bool(eff == "fix" and _in_text(r["answer"], r.get("evidence_text", ""))),
             "task": t, "judge": judged.get(tid),
             "valid": bool(t and t["valid"] and judged.get(tid) is not False),
             "hardness": ds[0]["hardness"] if ds else "", "subtype": ds[0]["subtype"] if ds else "",
@@ -141,18 +145,16 @@ def section_mode_a(ctx: Context, S: dict, known: dict[str, bool]) -> str:
     for c in conds:
         d = [x for x in recs[c] if x["group"] == "defective"]
         k = [x for x in recs[c] if x["group"] == "clean"]
-        dd, kd = Counter(x["decision"] for x in d), Counter(x["decision"] for x in k)
-        dfc.append([c, len(d), _pc(dd["accept"], len(d)),
-                    _pc(sum(x["decision"] == "correct" and x["key_ok"] for x in d), len(d)),
-                    _pc(sum(x["decision"] == "correct" and not x["key_ok"] for x in d), len(d)),
-                    _pc(dd["reject"], len(d)), _pc(dd["invalid"], len(d)),
-                    _pc(dd["reject"] + dd["correct"], len(d))])
-        cln.append([c, len(k), _pc(kd["accept"] + sum(x["decision"] == "correct" and x["key_ok"] for x in k), len(k)),
-                    _pc(sum(x["decision"] == "correct" and not x["key_ok"] for x in k), len(k)),
-                    _pc(kd["reject"], len(k)), _pc(kd["invalid"], len(k))])
+        dd, kd = Counter(x["eff"] for x in d), Counter(x["eff"] for x in k)
+        dfc.append([c, len(d), _pc(dd["keep"], len(d)), _pc(sum(x["flagged_kept"] for x in d), len(d)),
+                    _pc(sum(x["eff"] == "fix" and x["key_ok"] for x in d), len(d)),
+                    _pc(sum(x["eff"] == "fix" and not x["key_ok"] for x in d), len(d)),
+                    _pc(dd["reject"], len(d)), _pc(dd["invalid"], len(d)), _pc(dd["reject"] + dd["fix"], len(d))])
+        cln.append([c, len(k), _pc(kd["keep"], len(k)), _pc(sum(x["flagged_kept"] for x in k), len(k)),
+                    _pc(kd["fix"], len(k)), _pc(kd["reject"], len(k)), _pc(kd["invalid"], len(k))])
         e = [x for x in recs[c] if x["emitted"]]
         cause = Counter(x["cause"] for x in e)
-        corr = [x for x in recs[c] if x["decision"] == "correct"]
+        corr = [x for x in recs[c] if x["eff"] == "fix"]
         emit.append([c, len(e), _pc(sum(not x["key_ok"] for x in e), len(e)), cause["defect passed"],
                      cause["failed fix"], cause["introduced"], len(corr), _pc(sum(x["grounded"] for x in corr), len(corr))])
         ts = [x for x in e if x["task"]]
@@ -162,7 +164,7 @@ def section_mode_a(ctx: Context, S: dict, known: dict[str, bool]) -> str:
         funnel.append([c, len(e), st["E0"], st["E1"], st["E2"], st["E3"],
                        sum(1 for x in ts if x["task"]["valid"] and x["judge"] is False), st["E4"], len(v),
                        sum(not x["key_ok"] for x in v), vc["defect passed"], vc["failed fix"], vc["introduced"]])
-        caught = lambda xs: _pc(sum(x["decision"] in ("reject", "correct") for x in xs), len(xs))  # noqa: E731
+        caught = lambda xs: _pc(sum(x["eff"] in ("reject", "fix") for x in xs), len(xs))  # noqa: E731
         for name, fn in [("1-hop", lambda x: x["hops"] == 1), ("2-hop", lambda x: x["hops"] == 2),
                          ("head entity", lambda x: x["stratum"] == "head"), ("torso entity", lambda x: x["stratum"] == "torso"),
                          ("tail entity", lambda x: x["stratum"] == "tail")]:
@@ -176,25 +178,26 @@ def section_mode_a(ctx: Context, S: dict, known: dict[str, bool]) -> str:
     S["mode_a"] = {"defective": dfc, "clean": cln, "emitted": emit, "funnel": funnel, "strata": strat}
     with open(ctx.work / "results" / "exp1_mode_a_items.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["condition", "seed", "path_id", "j", "group", "ptype", "hops", "stratum", "decision", "emitted",
+        w.writerow(["condition", "seed", "path_id", "j", "group", "ptype", "hops", "stratum", "decision", "effective", "emitted",
                     "key_ok", "cause", "grounded", "valid", "hardness", "subtype", "known"])
         for c in conds:
             for x in recs[c]:
-                w.writerow([c, x["seed"], x["path_id"], x["j"], x["group"], x["ptype"], x["hops"], x["stratum"], x["decision"],
+                w.writerow([c, x["seed"], x["path_id"], x["j"], x["group"], x["ptype"], x["hops"], x["stratum"], x["decision"], x["eff"],
                             x["emitted"], x["key_ok"], x["cause"], x["grounded"], x["valid"], x["hardness"], x["subtype"], x["known"]])
     return "\n\n".join([
-        "Decision-level counts on the shared paths (do not depend on how the question is worded).",
+        "Decision-level counts on the shared paths (do not depend on how the question is worded). What counts is the "
+        "emitted key: a \"correct\" decision that keeps the Gw answer is counted as *kept* (the model flagged a fact but "
+        "did not change the key; shown separately as \"flagged, key kept\"); *fixed* = the key was changed.",
         "### Defective paths",
-        "accept = the defect passes into the task; correct = the Challenger replaces the answer key (right = equals G*); "
-        "caught = reject + correct.",
-        _md(["cond", "paths", "accept (defect passed)", "correct, right value", "correct, wrong value", "reject", "invalid",
-             "caught"], dfc),
+        "kept = the defect passes into the task; fixed right = the new key equals G*; caught = rejected or key changed.",
+        _md(["cond", "paths", "kept (defect passed)", "of which flagged, key kept", "fixed, right value", "fixed, wrong value",
+             "reject", "invalid", "caught"], dfc),
         "### Clean paths",
-        _md(["cond", "paths", "kept (accept, or correct to the same value)", "false fix (correct, wrong value)",
-             "false reject", "invalid"], cln),
+        _md(["cond", "paths", "kept", "of which flagged, key kept", "false fix (key changed)", "false reject", "invalid"], cln),
         "### Emitted tasks (accept + correct) with a wrong answer key, by cause",
         "defect passed = accepted defective path; failed fix = corrected a defective path to a wrong value; "
-        "introduced = changed the key of a clean path. Grounded = the corrected value appears in the evidence shown.",
+        "introduced = changed the key of a clean path. Corrections = key changes; grounded = the new key appears in the "
+        "evidence shown.",
         _md(["cond", "emitted", "wrong key", "defect passed", "failed fix", "introduced", "corrections", "grounded corrections"],
             emit),
         "### Funnel of emitted tasks (E0-E5)",
@@ -202,7 +205,7 @@ def section_mode_a(ctx: Context, S: dict, known: dict[str, bool]) -> str:
         _md(["cond", "emitted", "E0 fail", "E1 fail", "E2 fail", "E3-rule fail", "E3-judge fail", "E4 fail", "valid",
              "E5 wrong key", "E5: defect passed", "E5: failed fix", "E5: introduced"], funnel),
         "### Strata",
-        "caught = rejected or corrected (on defective paths); false alarm = rejected or corrected (on clean paths).",
+        "caught = rejected or key changed (on defective paths); false alarm = rejected or key changed (on clean paths).",
         _md(["cond", "stratum", "defective: caught", "clean: false alarm"], strat),
     ])
 
@@ -337,8 +340,9 @@ def section_solver(ctx: Context, S: dict) -> str:
         vs_gs[(r["task_id"], r["setting"])] += int(bool(t.get("gs_answers")) and match_any(a, t["gs_answers"]))
     groups: dict[tuple, list[str]] = defaultdict(list)
     for tid in sorted({tid for tid, _ in vs_key}):
-        groups[(tasks[tid]["condition"], tasks[tid]["source"])].append(tid)
-    order = sorted(groups, key=lambda g: (g[1] != "mode_a", COND_ORDER.index(g[0]) if g[0] in COND_ORDER else 99))
+        t = tasks[tid]  # Mode A tasks are split by path group: corrected defective tasks are unanswerable on Gw
+        groups[(t["condition"], t["source"] + (f"/{t['group']}" if t.get("group") else ""))].append(tid)
+    order = sorted(groups, key=lambda g: (g[1].split("/")[0] != "mode_a", g[1], COND_ORDER.index(g[0]) if g[0] in COND_ORDER else 99))
     bins = _bins(k)
     rates, diff, wrong = [], [], []
     for g in order:
