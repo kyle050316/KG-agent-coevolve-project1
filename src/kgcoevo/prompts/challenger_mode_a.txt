@@ -22,7 +22,7 @@ one question with a correct answer key, or reject it.
    The question must name: {{mention_names}}
    The question must NOT name these intermediate entities: {{hidden_names}}
    It must not contain the answer and must ask for exactly what the last step returns.
-4. Base the decision only on the evidence shown, not on your background knowledge.
+4. {{knowledge_rule}}
 
 Return only a JSON object:
 {"decision": "accept|correct|reject",

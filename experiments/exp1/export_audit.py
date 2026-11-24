@@ -2,10 +2,9 @@
 
   e3_audit.csv            question / program / answer key, two annotator columns (faithful 1/0)
   e3_audit_key.json       audit_id -> task_id (do not show to annotators)
-  natural_gaps_audit.csv  claims scored "natural": is the passage really stating a KG gap? (1/0)
 
-After labelling, save the filled sheet as audit/e3_audit_labels.csv; `analyze` then reports
-inter-annotator kappa and the judge's accuracy against the human majority.
+The audit is optional. If it is done, save the filled sheet as audit/e3_audit_labels.csv; `analyze`
+then reports inter-annotator kappa and the judge's accuracy against the human majority.
 
 Usage:  python -m experiments.exp1.export_audit --config configs/main.yaml
 """
@@ -17,7 +16,6 @@ import random
 
 from experiments.common import parse_args, setup
 from kgcoevo.context import Context
-from kgcoevo.eval.discovery import KeyResolver, score_report
 from kgcoevo.eval.stats import cohen_kappa
 from kgcoevo.runner import read_json, read_jsonl, write_json
 
@@ -47,27 +45,7 @@ def export(ctx: Context) -> None:
             w.writerow([aid, t["question"], t["description"], t["answer"], "", ""])
     write_json(key, audit_dir / "e3_audit_key.json")
 
-    # natural-gap claims
-    rate = ctx.cfg["defects"]["main_rate"]
-    resolver = KeyResolver(ctx.gs)
-    rows = []
-    for r in read_jsonl(ctx.work / "exp1" / "mode_b.jsonl"):
-        if "error" in r:
-            continue
-        defs = [d for d in ctx.defects(rate, r["seed"]) if d["subject"] == r["entity"]]
-        sc = score_report(ctx.gs, ctx.gw(rate, r["seed"]), resolver, r["entity"], r["gaps"], defs, set(r["shown_pids"]),
-                          ctx.index.by_id)
-        for cl in sc["claims"]:
-            if cl["category"] == "natural":
-                p = ctx.index.by_id.get(cl["evidence_id"])
-                rows.append([r["condition"], ctx.gs.name(r["entity"]), cl["key"], cl["claimed_value"], cl["label"],
-                             p.text if p else "", ""])
-    rng.shuffle(rows)
-    with (audit_dir / "natural_gaps_audit.csv").open("w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["condition", "entity", "key", "claimed_value", "label", "passage", "true KG gap? (1/0)"])
-        w.writerows(rows[: ctx.cfg["exp1"]["audit"]["natural_n"]])
-    print(f"[audit] {len(picked)} E3 items, {min(len(rows), ctx.cfg['exp1']['audit']['natural_n'])} natural-gap items")
+    print(f"[audit] {len(picked)} E3 items (optional human audit of the judge)")
 
 
 def judge_agreement(ctx: Context) -> dict:

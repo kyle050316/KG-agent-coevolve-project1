@@ -2,7 +2,7 @@
 
 Protocol (following KG error-detection practice, e.g. CKRL/CAGED, and IKGQA in Generate-on-Graph):
 * defects are sampled from S (document-supported facts) within a scope of entities, at a given
-  rate (several rates are used to test dose-response);
+  rate;
 * deletions and corruptions are split 1:1 by default;
 * corruptions are either "similar" (type-consistent, plausible: same-concept entity that already
   appears as an object of the same relation; nearby dates/years; quantities within +-10-30%;

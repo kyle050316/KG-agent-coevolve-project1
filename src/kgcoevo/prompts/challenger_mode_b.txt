@@ -11,13 +11,13 @@ You audit one entity of a WORKING knowledge graph (KG) that may contain missing 
 {{evidence}}
 
 ## Instructions
-- Report facts about THIS entity (as subject) that the evidence states explicitly but the KG
+- Report facts about THIS entity (as subject) that {{source_phrase}} but the KG
   either lacks ("missing") or stores with a different value ("conflict").
 - Use KG keys (relation or attribute names) from this list whenever possible: {{allowed_keys}}
 - For relations, the claimed value is the exact name of the other entity.
 - Dates as YYYY-MM-DD when the day is known, otherwise YYYY.
 - Every reported gap must cite its evidence item ({{cite_note}}).
-- Do not report anything the evidence does not state; do not use background knowledge.
+- {{knowledge_rule}}
 - If you find nothing, return an empty list.
 
 Return only a JSON object:

@@ -12,8 +12,8 @@ the scoring KG, Wikipedia (KILT snapshot) plays the role of the literature, and 
 
 Every answer key, check and score is computed by executing KoPL programs with the **official KoPL
 engine** on the hidden reference KB G\* and the defective working KB Gw. LLM judgments are used only
-where execution cannot decide, such as whether a question faithfully expresses a program. Those are
-audited by humans.
+where execution cannot decide, such as whether a question faithfully expresses a program. Human audit
+sheets for those are exported but optional.
 
 ```
  G* (KQA Pro KB) --inject defects into S--> Gw (working KG) ----+
@@ -32,55 +32,80 @@ audited by humans.
 | Reference KB G\* | Official KQA Pro `kb.json` (16,960 entities), loaded by the official KoPL engine | Exact, executable ground truth |
 | Documents D | KILT Wikipedia snapshot (2019-08-01), cut into ≤100-word passages that keep hyperlink anchors → Wikidata QIDs | Closer in time to the KB than today's Wikipedia; anchors give gold entity links |
 | Regions | 400 "human" entities, stratified by page length (head/torso/tail). **A** (200) for Exp 1; **B** (200, entities that KQA Pro questions are about) for Exp 2 | Popularity strongly affects memorisation (PopQA); disjoint regions keep Exp 2/3 held-out |
-| S (document-supported facts) | T-REx-style alignment: exact dates, numbers and strings; years and relations only together with a relation cue word; human audit of 50 facts | Every injected defect is discoverable from text in principle |
-| Defects → Gw | Sampled from S at 30% (10/20% added in `extended.yaml` for a dose-response), deletions:corruptions = 1:1; corruptions are *similar* (type-consistent) or *random* (50/50); both copies of a relation (forward and backward) edited together; self-check on the engine | KG error-detection protocol (CKRL/CAGED); CCA shows similar noise is the hard case |
-| Paths | Sampled on Gw, compiled to KoPL by a deterministic compiler, unique answer on Gw verified by execution; 1-hop and 2-hop, attributes, relations and qualifiers | LLM program-writing errors cannot be mistaken for KG-induced errors |
+| S (document-supported facts) | T-REx-style alignment: exact dates, numbers and strings; years and relations only together with a relation cue word; optional human audit of 50 facts | Every injected defect is discoverable from text in principle |
+| Defects → Gw | A copy of G\* with 30% of the S facts of region A deleted or corrupted (1:1); corruptions are *similar* (type-consistent) or *random* (50/50); both copies of a relation (forward and backward) edited together; self-check on the engine. The defect log (`defects.jsonl`) records each edit and is the ground truth | KG error-detection protocol (CKRL/CAGED); CCA shows similar noise is the hard case |
+| Paths | Directed sampling on Gw, compiled to KoPL by a deterministic compiler: 100 *defective* paths (use a corrupted fact; the G\* answer differs from the Gw answer) and 100 *clean* paths (no fact changed, first hop in S, same answer on Gw and G\*), with the same path-type mix; 1-hop and 2-hop, attributes, relations and qualifiers | Fixed counts in both groups; LLM program-writing errors cannot be mistaken for KG-induced errors |
 
 ### 1.2 Exp 1: conditions and modes
 
-The main design compares three information conditions; B0 is a free no-LLM reference line.
+The question: when Gw has errors, can the Challenger find them from Gw plus documents, and how many
+generated tasks carry a wrong answer key? B0 is a free no-LLM reference line.
 
 | Condition | The Challenger sees | Mode A (path → task) | Mode B (entity → gap report) |
 |---|---|---|---|
-| **B0** | nothing (no LLM; template question, Gw answer) | ✓ exact contamination baseline | – |
+| **B0** | nothing (no LLM; template question, Gw answer) | ✓ | – |
 | **C1** | Gw (KG only) | ✓ | ✓ |
-| **C2** | Gw + BM25 passages (KG + documents) | ✓ (main) | ✓ (main) |
-| **C3** | Gw + G\* (KG + reference KG, oracle) | ✓ upper bound | ✓ upper bound |
-| C0 *(extended)* | entity name only (closed-book probe of every S fact) | – | ✓ what memory alone recovers |
-| C2link *(extended)* | as C2, with gold KG ids after linked mentions | ✓ | ✓ |
+| **C1know** | Gw, and it may use its own background knowledge | ✓ | ✓ |
+| **C2** | Gw + documents: the S passage that states each fact (gold) is always shown, mixed with distractors | ✓ (main) | ✓ (main) |
+| **C3** | Gw + G\* (oracle) | ✓ upper bound | ✓ upper bound |
+| C0 *(optional)* | entity name only (closed-book probe of every S fact) | – | ✓ what memory alone recovers |
 
-All conditions receive the **same paths and entities** (paired design). Evidence is pre-retrieved by a
-fixed procedure, so conditions differ only in the information they show.
+* **Input.** One prompt per path or entity, no tools: evidence is pre-retrieved by a fixed procedure. Every
+  condition sees the same working-KG context (all facts of the entities on the path, or of the entity). Only
+  C1know may use background knowledge; the other prompts forbid it.
+* **C2 documents.** Mode A: per path fact, the gold passage(s) plus BM25 distractors from the same pages,
+  3 passages per fact (facts outside S get 3 BM25 passages). Mode B: all S passages of the entity plus 4 other
+  passages of its page. Gold passages are looked up in the same way for defective and clean facts (a corrupted
+  fact gets the passage of the fact it replaced) and passages are listed in page order, so which passages
+  appear does not reveal where the defects are.
+* **Why S.** Defects are injected only into facts that the documents state. A miss is then the Challenger's
+  failure, not missing document coverage, and clean and defective paths are both text-supported, so false
+  alarms are not caused by facts the documents never mention.
+* **Decoding.** The Challenger decodes greedily (temperature 0), one decision per path or entity.
 
-**Mode A.** The Challenger checks the path facts and either accepts the path (writing a question), corrects
-the answer from evidence, or rejects the path. Each task then goes through the checks below.
+**Mode A.** All conditions get the same 200 paths. For each path the Challenger *accepts* it (writes a question;
+the key is the Gw answer), *corrects* it (a path fact contradicts the evidence; the key is the corrected value),
+or *rejects* it. Reported as counts, at the decision level (independent of the question wording):
+
+* Defective paths: accepted (defect passed into the task), corrected to the right / a wrong value, rejected; caught = reject + correct.
+* Clean paths: kept, falsely corrected, falsely rejected.
+* Emitted tasks (accept + correct) with a wrong key, by cause: *defect passed*, *failed fix*, *introduced*
+  (the key of a clean path was changed); corrections whose value appears in the evidence shown (grounded).
+* Strata of the catch rate: hops, similar vs random corruption, subtype, entity popularity (head/torso/tail),
+  and known/unknown to the closed-book probe if C0 was run.
+
+Each emitted task also goes through the checks:
 
 | Check | Decided by | Meaning |
 |---|---|---|
 | E0 format | program | JSON parses, KoPL program well formed |
-| E1 executable | KoPL engine | runs on Gw (on G\* for tasks built from facts missing in Gw), non-empty answer |
-| E2 bookkeeping | KoPL engine | the answer key equals the program output on Gw (accepted tasks) |
-| E3 faithful | rules + LLM judge + human audit | anchor named, no bridge entity or answer leaked; question expresses the program |
-| E4 unique | KoPL engine | exactly one answer on G\* |
-| **E5 contaminated** | KoPL engine | passes E0–E4 but the key differs from the G\* answer, i.e. caused by a KG defect |
+| E1 executable | KoPL engine | runs on Gw (on G\* for gap tasks) and, for Mode A, returns an answer |
+| E2 bookkeeping | KoPL engine | accepted tasks: the key equals the program output on Gw (no copy error) |
+| E3 faithful | rules + LLM judge | anchor named, no bridge entity or answer leaked; the judge checks that the question expresses the program |
+| E4 unique | KoPL engine | exactly one answer on G\* (gap tasks: also none) |
+| **E5 wrong key** | KoPL engine | passes E0–E4 but the key differs from G\*; split by cause as above |
 
-**Mode B.** Each claimed gap is scored against the defect log as *hit / located-only / false gap /
-unsupported / natural*. Natural gaps are real gaps in the original KB; they are excluded from precision and
-human-audited. The analysis reports precision, end-to-end recall, recall on defects whose gold passage was
-shown, label accuracy and a FEVER-style strict score. Reported gaps are then compiled into 2-hop tasks that
-go through the same checks.
+**Mode B.** For 100 entities the Challenger reports gaps (missing or conflicting facts). Each claim is scored
+against the defect log: a *hit* (key and true value of an injected defect) or an error; errors on the key of a
+defect with a wrong value are counted separately as *located-only*. Precision = hits / claims, recall =
+detected defects / defects, label accuracy = detected defects with the right label (missing for deletions,
+conflict for corruptions) / detected defects. Real gaps of the original KB count as errors (no human audit).
+Recall is broken down by deleted vs corrupted, similar vs random and entity popularity.
 
-**Task quality.** The Solver answers a sample of valid tasks on Gw, on G\* and closed-book. The analysis
-reports gap dependence (fails on Gw, succeeds on G\*), closed-book leakage, frontier rate (25–75% pass
-rate) and tasks that fail even on G\*.
+**Gap tasks.** The first resolvable claim of each entity is compiled into a 2-hop task whose key is the claimed
+value. A claim whose fact does not exist in G\* is counted as a wrong key (the Challenger's error), not dropped.
 
-**Hypotheses** (fix them before the main run):
+**Task quality.** The Solver answers 40 valid tasks per condition and source (Mode A / gap) 8 times each, on Gw,
+on G\* and closed-book. The report gives pass rates against the task key and against G\*, the difficulty of tasks
+with a correct key (target: 3–5 of 8 correct on Gw), gap dependence (fails on Gw, succeeds on G\*), closed-book
+leakage, and tasks with a wrong key on which the Solver on Gw agrees with the key: there the reward would
+confirm the wrong fact and the error stays hidden.
 
-* H1: C1 ≈ B0: the LLM alone does not lower contamination.
-* H2: C2 < C1 on per-path contamination (paired).
-* H3: Mode B recall C2 > C1, with precision above a preset threshold; C3 bounds both.
-* H4: recall is lower for similar corruptions and tail entities.
-* (extended) B0 contamination rises with the defect rate; C2link closes most of the C2–C3 gap.
+**Expected outcomes** (stated before the main run; counts only, statistical tests to be added later):
+
+* B0 and C1 pass most defects; C2 catches more defects than C1 with few false alarms on clean paths; C3 bounds both.
+* C1know shows what the model's own knowledge adds without documents, mostly for popular (head) entities.
+* Mode B: C2 recall > C1 recall at useful precision; similar corruptions and tail entities are harder.
 
 ### 1.3 Exp 2: cases, triggers and Curator
 
@@ -133,10 +158,11 @@ output. Each KG case has one sandboxed defect on a fact of the gold path (IKGQA 
 
 ### 1.4 Statistics and reporting
 
-* Proportions are reported with Wilson 95% CIs.
+* **Exp 1 reports counts only** (k/n and %); confidence intervals and paired tests are to be added later.
+* Exp 2: proportions are reported with Wilson 95% CIs.
 * Means use cluster bootstrap over anchor entities (Miller 2024, *Adding Error Bars to Evals*).
 * Conditions are compared on paired items: paired cluster bootstrap plus exact McNemar, Holm-corrected over the pre-registered hypotheses.
-* Human audits use two annotators and report Cohen's κ; the LLM judge's accuracy is measured against the human majority.
+* Human audits are optional (two annotators, Cohen's κ, the judge's accuracy against the human majority).
 * Every run writes `config.resolved.yaml` and `manifest.jsonl` (package versions, git commit). Commit and tag the
   resolved config before the main run; it is the pre-registration.
 
@@ -148,7 +174,7 @@ output. Each KG case has one sandboxed defect on a fact of the gold path (IKGQA 
 git clone https://github.com/kyle050316/KG-agent-coevolve-project1.git
 cd KG-agent-coevolve-project1
 pip install -e ".[dev]"
-pytest -q          # 28 tests, incl. an end-to-end run of every stage on a tiny KB with a scripted LLM
+pytest -q          # 30 tests, incl. an end-to-end run of every stage on a tiny KB with a scripted LLM
 ```
 
 ### Colab, one A100 (80 GB recommended) or H100
@@ -182,12 +208,13 @@ python -m experiments.exp2.run --config configs/main.yaml --stages curator
 ```
 
 All stages are resumable: re-running a command skips items that are already in its JSONL output.
-After the pilot, check the parse rates and the case counts printed by `build_cases` (how many KG cases are
-visible vs silent) before starting the main run.
+After the pilot, check the parse rates, the path counts printed by `prepare` (`[paths] defective=… clean=…`;
+if there are fewer defective paths than requested, raise `paths_sampling.max_per_defect` or the defect rate)
+and the case counts printed by `build_cases` (how many KG cases are visible vs silent) before the main run.
 
-**Judge model.** By default `llm.judge` uses the same endpoint at temperature 0. A different model family
-avoids self-preference. To use one, point `llm.judge.base_url/model/api_key` at it and set
-`llm.judge.vllm_extras=false` for hosted APIs.
+**Judge model.** `llm.judge` uses the same endpoint (the same 9B model) at temperature 0 and judges every
+task, so it may favour its own questions. If a second model becomes available, point
+`llm.judge.base_url/model/api_key` at it (`llm.judge.vllm_extras=false` for hosted APIs).
 
 **Colab notes.**
 
@@ -203,7 +230,7 @@ avoids self-preference. To use one, point `llm.judge.base_url/model/api_key` at 
 | `configs/base.yaml` | all defaults with comments = the simplified main design |
 | `configs/main.yaml` | main run (work dir `runs/main`) |
 | `configs/pilot.yaml` | smoke test on real data with small numbers |
-| `configs/extended.yaml` | optional: B0 dose-response (10/20/30%), C0 probe, C2link, more paths, Solver k=4, no_docs ablation, 2 Curator seeds |
+| `configs/extended.yaml` | optional: C0 probe, more paths and Mode B entities, no_docs ablation, 2 Curator seeds |
 
 Override anything from the command line with `key.sub=value` after the step (or `--set key.sub=value`).
 
@@ -215,18 +242,18 @@ Override anything from the command line with `key.sub=value` after the step (or 
 <work_dir>/
   config.resolved.yaml, manifest.jsonl
   data/   region.json, passages.jsonl, support.jsonl, support_summary.json, probe_items.jsonl
-          gw/rate30_seed0/{kb.json, defects.jsonl, selfcheck.json}    paths/rate30_seed0.jsonl
+          gw/rate30_seed0/{kb.json, defects.jsonl, selfcheck.json}    paths/rate30_seed0{.jsonl, _stats.json}
   exp1/   probe, mode_a, mode_b, gap_tasks, tasks (with E0-E5), judge, solver  (.jsonl)
   exp2/   pool, pool_solver, case_solver, cases, curator, locality_solver  (.jsonl)
-  audit/  support_audit.csv, e3_audit.csv (+ key), natural_gaps_audit.csv
+  audit/  support_audit.csv, e3_audit.csv (+ key)            (optional human audits)
   results/ exp1_report.md, exp1_summary.json, exp1_mode_a_items.csv,
            exp2_report.md, exp2_summary.json, exp2_runs.csv
 ```
 
-**Human steps.**
+**Optional human steps.** Nothing in the pipeline requires them; without them S precision and the judge are unaudited.
 
-1. Fill in `audit/support_audit.csv` and check that S precision is ≥ 95% before the main run.
-2. After Exp 1, two annotators fill in `audit/e3_audit.csv`. Save the filled sheet as `audit/e3_audit_labels.csv`;
+1. Fill in `audit/support_audit.csv` to check S precision (target ≥ 95%).
+2. Two annotators fill in `audit/e3_audit.csv`. Save the filled sheet as `audit/e3_audit_labels.csv`;
    `experiments.exp1.analyze` then reports κ and the judge's accuracy.
 
 ---
@@ -239,13 +266,13 @@ caching on one A100 80GB, and per-call token counts guessed before the pilot. Re
 
 | Stage | Calls (approx.) | A100 80GB hours |
 |---|---|---|
-| Exp 1 Mode A (B0 + C1/C2/C3 × 200 paths), Mode B (100 entities × 3), gap tasks, judge | ~2k | ~0.5 |
-| Exp 1 Solver evaluation (Gw / G\* / closed-book) | ~1k | ~0.7 |
+| Exp 1 Mode A (C1/C1know/C2/C3 × 200 paths), Mode B (100 entities × 4), gap tasks, judge (all tasks) | ~3k | ~0.5–1 |
+| Exp 1 Solver evaluation (9 groups × 40 tasks × 8 samples × Gw / G\* / closed-book) | ~8.6k solves | ~2–5 |
 | Exp 2 pool (1,000 questions × 4 Solver samples) | ~4k solves | ~1–3 |
 | Exp 2 KG cases (200 × 4 Solver samples) | ~800 solves | ~0.3–0.6 |
 | Exp 2 Curator (2 turns + sandbox answer + verifier; no_tool on 100 cases) | ~1.5k | ~0.5–1 |
 | Exp 2 Solver-level locality (20 edits × 30 questions × 2) | ~1.2k solves | ~0.5–0.9 |
-| **Total** | | **~4–7** |
+| **Total** | | **~6–12** |
 
 Exp 3 (GRPO on the 9B Solver) is not part of this repository and needs a multi-GPU node.
 
@@ -276,6 +303,12 @@ tests/             unit tests + end-to-end pipeline test on a fixture KB
 * **Single-turn Challenger.** The Challenger receives pre-retrieved evidence instead of calling tools in a
   multi-turn loop. This removes the 9B model's tool-calling reliability as a confound. A multi-turn agent
   version is a natural follow-up.
+* **Oracle retrieval in C2.** The gold passage is always shown (with distractors), so C2 measures reading and
+  judgement, not retrieval. A retrieval-only variant can be added back later.
+* **Same-model judge, no human audit.** E3 is judged by the same 9B model, and S precision and the judge are
+  not audited by humans unless the optional sheets are filled in.
+* **Mode A covers corruptions only.** A deleted fact cannot lie on a path sampled from Gw; deletions are
+  measured in Mode B.
 * **Restricted traceability.** Exp 2 uses the traceable KoPL subset (chain programs). Questions with set
   operations, filters or aggregation are excluded because their gold path is not well defined.
 * **Single-fact edits without qualifiers.** The Curator adds or updates one attr/rel fact; defects are drawn
@@ -283,7 +316,7 @@ tests/             unit tests + end-to-end pipeline test on a fixture KB
 * **Biased S.** S only contains facts that Wikipedia states explicitly, so it is a biased subset of the KB
   (Kang et al. 2026). `support_summary.json` reports its composition; conclusions apply to text-supported facts.
 * **Unverified KQA Pro snapshot date.** The KQA Pro paper does not state its Wikidata snapshot date; the
-  2019 KILT snapshot is the closest standard corpus. Real disagreements surface as "natural" gaps and are audited.
+  2019 KILT snapshot is the closest standard corpus. Real disagreements between the two show up as gap claims that are not injected defects; they are counted as errors.
 
 ---
 

@@ -23,29 +23,31 @@ async def mode_a(llm, path: dict, cond: str, evb: EvidenceBuilder | None, gw: KB
     base = {"path_id": path["path_id"], "condition": cond, "llm_seed": seed}
     if cond == "B0":
         return {**base, "decision": "accept", "question": path["template_question"], "answer": path["answer_gw"],
-                "suspect_facts": [], "raw": None, "shown_pids": []}
+                "suspect_facts": [], "raw": None, "shown_pids": [], "gold_pids": [], "evidence_text": ""}
     ev = evb.path(path, cond)
     msgs = messages("challenger_mode_a", description=path["description"], path_facts=ev["path_facts"],
-                    evidence=ev["text"], condition_note=ev["note"], mention_names=_names(gw, path["mention"]),
-                    hidden_names=_names(gw, path["hidden"]))
+                    evidence=ev["text"], condition_note=ev["note"], knowledge_rule=ev["knowledge_rule"],
+                    mention_names=_names(gw, path["mention"]), hidden_names=_names(gw, path["hidden"]))
     raw = await llm.chat(msgs, seed=seed)
     js = extract_json(raw) or {}
     decision = str(js.get("decision", "")).strip().lower()
     return {**base, "decision": decision if decision in DECISIONS else "invalid",
             "question": str(js.get("question", "") or ""), "answer": str(js.get("answer", "") or ""),
             "suspect_facts": js.get("suspect_facts", []) if isinstance(js.get("suspect_facts"), list) else [],
-            "parse_ok": bool(js), "raw": raw, "shown_pids": ev["shown_pids"]}
+            "parse_ok": bool(js), "raw": raw, "shown_pids": ev["shown_pids"], "gold_pids": ev["gold_pids"],
+            "evidence_text": ev["text"]}
 
 
 async def mode_b(llm, eid: str, cond: str, evb: EvidenceBuilder, gw: KBStore, seed: int | None = None) -> dict:
     ev = evb.entity(eid, cond)
     msgs = messages("challenger_mode_b", entity=gw.describe(eid), kg_facts=ev["kg_facts"], evidence=ev["text"],
-                    allowed_keys=ev["allowed_keys"], cite_note=ev["cite_note"])
+                    allowed_keys=ev["allowed_keys"], cite_note=ev["cite_note"], source_phrase=ev["source_phrase"],
+                    knowledge_rule=ev["knowledge_rule"])
     raw = await llm.chat(msgs, seed=seed)
     js = extract_json(raw) or {}
     gaps = js.get("gaps", [])
     return {"entity": eid, "condition": cond, "llm_seed": seed, "gaps": gaps if isinstance(gaps, list) else [],
-            "parse_ok": bool(js), "raw": raw, "shown_pids": ev["shown_pids"]}
+            "parse_ok": bool(js), "raw": raw, "shown_pids": ev["shown_pids"], "gold_pids": ev["gold_pids"]}
 
 
 def gap_task_specs(gw: KBStore, gs: KBStore, resolver: KeyResolver, eid: str, gaps: list[dict],

@@ -31,10 +31,13 @@ class Script:
     def __init__(self):
         self.paths = {}  # description -> path record
         self.programs = {q["question"]: q["program"] for q in QUESTIONS}
+        self.know_prompts = 0  # Challenger prompts that allow background knowledge (C1know)
 
     def __call__(self, msgs, seed):
         text = msgs[-1]["content"]
         t = task_of(msgs)
+        if t.startswith("challenger") and "own background knowledge" in text:
+            self.know_prompts += 1
         if t == "probe":
             return json.dumps({"answer": "1961-08-04" if "Barack Obama" in text else "unknown", "confidence": 0.5})
         if t == "challenger_mode_a":
@@ -120,12 +123,11 @@ def _make_run(d, mutate=None):
     cfg = yaml.safe_load(open("configs/base.yaml"))
     cfg["paths"] = {"kqapro_dir": str(kq), "kilt_source": str(src), "kilt_pages": str(d / "pages.jsonl"), "work_dir": str(d / "run")}
     cfg["region"].update({"n_a": 2, "n_b": 2, "min_facts": 3, "min_page_words": 5, "min_questions_b": 1})
-    cfg["defects"].update({"rates": [0.3, 0.6], "main_rate": 0.6, "seeds": [0]})
-    cfg["paths_sampling"].update({"n": 12, "n_sweep": 6})
-    cfg["exp1"]["mode_a"]["conditions"] = ["B0", "C1", "C2", "C2link", "C3"]
-    cfg["exp1"]["mode_b"].update({"conditions": ["C1", "C2", "C3"], "n_entities": 2})
-    cfg["exp1"]["solver"].update({"n_per_condition": 5, "k": 2, "fewshot_pool": 100})
-    cfg["exp1"]["audit"] = {"e3_n": 6, "natural_n": 5}
+    cfg["defects"].update({"rate": 0.6, "seeds": [0]})
+    cfg["paths_sampling"].update({"n_defective": 6, "n_clean": 6})
+    cfg["exp1"]["mode_b"]["n_entities"] = 2
+    cfg["exp1"]["solver"].update({"n_per_group": 5, "k": 2, "fewshot_pool": 100})
+    cfg["exp1"]["audit"] = {"e3_n": 6}
     cfg["exp1"]["probe"]["enabled"] = True
     cfg["exp2"].update({"pool_size": 50, "k": 2, "ablation_n": 6, "samples": 2, "locality_n": 10, "solver_locality_edits": 2,
                         "ablations": ["full", "no_tool", "no_docs"], "targets": {"missing_fact": 3, "wrong_fact": 3, "non_kg": 2}})
@@ -160,11 +162,22 @@ def test_end_to_end(run_dir, capsys):
     for s in ctx.cfg["defects"]["seeds"]:
         for p in ctx.paths(0.6, s):
             script.paths[p["description"]] = p
-    assert ctx.paths(0.6, 0), "paths were sampled"
+    paths = ctx.paths(0.6, 0)
     assert ctx.defects(0.6, 0), "defects were injected"
+    assert {p["group"] for p in paths} == {"defective", "clean"}, "both path groups were sampled"
+    assert all(p["answer_affecting"] and p["defect_ids"] for p in paths if p["group"] == "defective")
+    assert not any(p["answer_affecting"] for p in paths if p["group"] == "clean")
     assert json.loads((ctx.gw_dir(0.6, 0) / "selfcheck.json").read_text())["n_failed"] == 0
 
     r1.main(llms, _args(run_dir, ["all"]))
+    assert script.know_prompts > 0, "C1know prompts allow background knowledge"
+    mode_a = read_jsonl(run_dir / "run" / "exp1" / "mode_a.jsonl")
+    assert {r["condition"] for r in mode_a} == {"B0", "C1", "C1know", "C2", "C3"}
+    groups = {p["path_id"]: p["group"] for p in paths}
+    c2 = [r for r in mode_a if r["condition"] == "C2" and groups[r["path_id"]] == "defective"]
+    assert c2 and all(r["gold_pids"] and set(r["gold_pids"]) <= set(r["shown_pids"]) for r in c2), "C2 always shows gold"
+    mode_b = read_jsonl(run_dir / "run" / "exp1" / "mode_b.jsonl")
+    assert all(set(r["gold_pids"]) <= set(r["shown_pids"]) for r in mode_b if r["condition"] == "C2")
     tasks = read_jsonl(run_dir / "run" / "exp1" / "tasks.jsonl")
     assert tasks and any(t["condition"] == "B0" for t in tasks)
     assert any(t["source"] == "gap" for t in tasks)
@@ -177,8 +190,10 @@ def test_end_to_end(run_dir, capsys):
     export_audit.main()
     a1.main()
     report = (run_dir / "run" / "results" / "exp1_report.md").read_text()
-    for section in ("Funnel", "Contamination", "Paired differences", "Mode B", "Task quality"):
-        assert section in report
+    for section in ("Defective paths", "Clean paths", "by cause", "Funnel", "Mode B", "Gap tasks", "Task quality",
+                    "Difficulty on Gw", "wrong key on Gw"):
+        assert section in report, section
+    assert "Paired" not in report and "McNemar" not in report  # counts only
 
     build_cases.main(llms, _args(run_dir, ["all"]))
     cases = read_jsonl(run_dir / "run" / "exp2" / "cases.jsonl")
@@ -203,8 +218,8 @@ def test_end_to_end(run_dir, capsys):
         assert section in rep2, section
 
 
-def test_exp1_minimal_config(tmp_path):
-    """Main-config shape of Exp 1: one rate, B0/C1/C2/C3, no C0 probe, no closed-book Solver setting."""
+def test_exp1_main_config(tmp_path):
+    """Main-config conditions (B0/C1/C1know/C2/C3), no C0 probe; a Solver setting that was not run is left out."""
     import sys
 
     from experiments.exp1 import analyze as a1, prepare, run as r1
@@ -212,8 +227,6 @@ def test_exp1_minimal_config(tmp_path):
     from kgcoevo.context import Context
 
     def mutate(cfg):
-        cfg["defects"].update({"rates": [0.6], "main_rate": 0.6})
-        cfg["exp1"]["mode_a"]["conditions"] = ["B0", "C1", "C2", "C3"]
         cfg["exp1"]["solver"]["settings"] = ["gw", "gstar"]
         cfg["exp1"]["probe"]["enabled"] = False
 
@@ -230,6 +243,6 @@ def test_exp1_minimal_config(tmp_path):
     sys.argv = ["x", "--config", str(d / "cfg.yaml")]
     a1.main()
     rep = (d / "run" / "results" / "exp1_report.md").read_text()
-    assert "| C3 |" in rep and "C2link" not in rep
+    assert "| C3 |" in rep and "| C1know |" in rep and "C2link" not in rep
     quality = rep.split("## Task quality (Solver)")[1]
-    assert "n/a" in quality  # closed-book columns are reported as not run
+    assert "gstar: pass vs G*" in quality and "closed" not in quality

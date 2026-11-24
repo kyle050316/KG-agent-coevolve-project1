@@ -7,14 +7,20 @@ answer on Gw with the official engine. All conditions of Exp 1 Mode A receive th
 
 Path types (hops): attr (1), rel (1), attr_qual (1), rel_qual (1), rel_attr (2), rel_rel (2),
 rel_relqual (2).
+
+``DirectedSampler`` draws the Exp 1 paths in two groups of fixed size: *defective* paths that use a
+corrupted fact and *clean* paths whose first-hop fact is an unchanged, text-supported fact (S).
 """
 
 from __future__ import annotations
 
 import hashlib
 import random
+from collections import Counter
 from dataclasses import asdict, dataclass, field
+from typing import Callable
 
+from kgcoevo.eval.compare import answers_equal
 from kgcoevo.kb.executor import Executor
 from kgcoevo.kb.store import Fact, KBStore
 from kgcoevo.kb.values import kopl_input
@@ -38,6 +44,8 @@ class Path:
     answer_gw: str
     template_question: str
     meta: dict = field(default_factory=dict)
+    group: str = ""  # "defective" | "clean" (DirectedSampler) or "" (PathSampler)
+    defect_ids: list[str] = field(default_factory=list)
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -86,6 +94,31 @@ class PathSampler:
         self.store = store
         self.ex = executor
         self.rng = random.Random(seed)
+        self._steps: dict[tuple, tuple[set, Counter]] = {}
+
+    def _relate(self, src: str, rel: str, direction: str, dst: str) -> list[dict] | None:
+        """Same result as :func:`relate_steps`, memoised per (src, rel, direction).
+
+        Hub entities (countries, big cities, parties) have thousands of neighbours; recomputing the
+        target set for every destination would make enumeration quadratic."""
+        key = (src, rel, direction)
+        if key not in self._steps:
+            s = self.store
+            targets = {n for n, _ in s.rel_step(src, rel, direction)}
+            names: Counter = Counter()
+            for t in targets:
+                names.update({s.concepts[c]["name"] for c in s.all_concepts(t)})
+            self._steps[key] = (targets, names)
+        targets, names = self._steps[key]
+        if dst not in targets:
+            return None
+        if len(targets) == 1:
+            return [step("Relate", rel, direction)]
+        for cid in self.store.all_concepts(dst):
+            cname = self.store.concepts[cid]["name"]
+            if names[cname] == 1:
+                return [step("Relate", rel, direction), step("FilterConcept", cname)]
+        return None
 
     # -- candidate enumeration -------------------------------------------------------------------
     def _rel_moves(self, eid: str) -> list[tuple[str, str, str, Fact]]:
@@ -93,21 +126,25 @@ class PathSampler:
         moves += [(f.key, "backward", f.subject, f) for f in self.store.rel_in(eid)]
         return [m for m in moves if m[2] != eid]
 
-    def candidates(self, a: str, ptype: str) -> list[dict]:
+    def candidates(self, a: str, ptype: str, first_ok: Callable[[Fact], bool] | None = None) -> list[dict]:
+        """All candidate paths of ``ptype`` from anchor ``a``; ``first_ok`` filters the first-hop fact."""
         s = self.store
         pre = find_prefix(s, a)
         if pre is None:
             return []
+        ok = first_ok or (lambda f: True)
         out: list[dict] = []
         attrs = s.attr_facts(a)
         if ptype == "attr":
             for key in sorted({f.key for f in attrs}):
                 f = _single(attrs, key)
-                if f:
+                if f and ok(f):
                     out.append(dict(program=pre + [step("QueryAttr", key)], facts=[f], ents=[a], hidden=[],
                                     mention=[a], words=[("attr", key)]))
         elif ptype == "attr_qual":
             for f in attrs:
+                if not ok(f):
+                    continue
                 for q in s.quals(f.fid):
                     if len(s.quals(f.fid, q.key)) == 1:
                         out.append(dict(program=pre + [step("QueryAttrQualifier", f.key, kopl_input(f.value), q.key)],
@@ -115,7 +152,9 @@ class PathSampler:
                                         words=[("attr_value", f.key, kopl_input(f.value)), ("qual", q.key)]))
         elif ptype in ("rel", "rel_attr", "rel_rel", "rel_relqual"):
             for rel, d, b, f in self._rel_moves(a):
-                rs = relate_steps(s, a, rel, d, b)
+                if not ok(f):
+                    continue
+                rs = self._relate(a, rel, d, b)
                 if rs is None:
                     continue
                 base = pre + rs
@@ -133,7 +172,7 @@ class PathSampler:
                     for rel2, d2, c, g in self._rel_moves(b):
                         if c == a:
                             continue
-                        rs2 = relate_steps(s, b, rel2, d2, c)
+                        rs2 = self._relate(b, rel2, d2, c)
                         if rs2:
                             out.append(dict(program=base + rs2 + [step("QueryName")], facts=[f, g], ents=[a, b, c],
                                             hidden=[b], mention=[a], words=[("rel", rel, d), ("rel", rel2, d2), ("name",)]))
@@ -154,7 +193,7 @@ class PathSampler:
         elif ptype == "rel_qual":
             for f in s.rel_out(a) + s.rel_in(a):
                 subj, obj = f.subject, f.value
-                if subj == obj:
+                if subj == obj or not ok(f):
                     continue
                 p1, p2 = find_prefix(s, subj), find_prefix(s, obj)
                 if p1 is None or p2 is None:
@@ -205,6 +244,149 @@ class PathSampler:
             facts_text=[s.fact_text(f) for f in c["facts"]], program=c["program"], description=desc,
             answer_gw=answer, template_question=template_question(s, a, c["words"]),
         )
+
+
+def _pid(program: list[dict]) -> str:
+    return hashlib.sha1(repr(program).encode()).hexdigest()[:12]
+
+
+def _weighted_order(rng: random.Random, items: list[str], weights: list[float]) -> list[str]:
+    """``items`` in random order, drawn without replacement with probability proportional to weight."""
+    pool = [(i, w) for i, w in zip(items, weights) if w > 0]
+    out = []
+    while pool:
+        k = rng.choices(range(len(pool)), [w for _, w in pool])[0]
+        out.append(pool.pop(k)[0])
+    return out
+
+
+def _allocate(counts: dict[str, float], n: int) -> Counter:
+    """Split ``n`` over the keys of ``counts`` in proportion to the values (largest remainder)."""
+    total = sum(counts.values())
+    if total <= 0 or n <= 0:
+        return Counter()
+    raw = {k: n * v / total for k, v in counts.items()}
+    out = Counter({k: int(x) for k, x in raw.items()})
+    for k in sorted(raw, key=lambda k: (-(raw[k] - int(raw[k])), k))[: n - sum(out.values())]:
+        out[k] += 1
+    return out
+
+
+class DirectedSampler:
+    """Exp 1 Mode A paths in two groups of fixed size, shared by all conditions.
+
+    defective  the path uses a corrupted fact, anchored at the defect's subject (the corrupted fact,
+               or the fact it qualifies, is the first hop), and the defect changes a well-defined
+               answer: the program has a unique answer on G* that differs from the Gw answer.
+    clean      no path fact is changed, the first-hop fact is in S (stated in the documents), and the
+               program has the same unique answer on Gw and G*.
+
+    Both groups have a unique G* answer and a text-supported first hop, so detection on defective
+    paths and false alarms on clean paths are measured on comparable facts. Clean paths follow the
+    path-type mix of the defective group. Each corrupted fact gets at most ``max_per_defect`` paths.
+    Deleted facts cannot lie on a path sampled from Gw; they are measured in Mode B.
+    """
+
+    def __init__(self, gw: KBStore, gw_exec: Executor, gs_exec: Executor, gs_cids: set[str], s_cids: set[str],
+                 seed: int = 0):
+        self.gw = gw
+        self.ps = PathSampler(gw, gw_exec, seed=seed)
+        self.gwx, self.gsx = gw_exec, gs_exec
+        self.gs_cids, self.s_cids = gs_cids, s_cids
+        self.rng = random.Random(seed)
+        self.seen: set[str] = set()
+        self._clean_cands: dict[tuple[str, str], list[dict]] = {}
+
+    def _run(self, c: dict):
+        r = self.gwx.run(c["program"])
+        return (r.answers[0], self.gsx.run(c["program"])) if r.unique else None
+
+    def _defective(self, d: dict, types: list[str], weights: list[float], max_tries: int) -> Path | None:
+        gw = self.gw
+        fid = gw.cid_to_fid.get(d["cid_after"])
+        if fid is None:
+            return None
+        f = gw.facts[fid]
+        first_cid = gw.cid(f.parent) if f.kind == "qual" else d["cid_after"]
+        tries = 0
+        for t in _weighted_order(self.rng, types, weights):
+            cands = [c for c in self.ps.candidates(d["subject"], t, lambda g: gw.cid(g.fid) == first_cid)
+                     if d["cid_after"] in {gw.cid(x.fid) for x in c["facts"]}]
+            self.rng.shuffle(cands)
+            for c in cands:
+                pid = _pid(c["program"])
+                if pid in self.seen:
+                    continue
+                if tries >= max_tries:
+                    return None
+                tries += 1
+                res = self._run(c)
+                if res and res[1].unique and not answers_equal(res[1].answer, res[0]):
+                    self.seen.add(pid)
+                    p = self.ps._make(pid, t, d["subject"], c, res[0])
+                    p.group = "defective"
+                    return p
+        return None
+
+    def _clean(self, anchors: list[str], t: str, need: int, max_tries: int) -> list[Path]:
+        out: list[Path] = []
+        order = list(anchors)
+        self.rng.shuffle(order)
+        tries = i = 0
+        while len(out) < need and tries < need * max_tries and order:
+            a = order[i % len(order)]
+            i += 1
+            tries += 1
+            if (a, t) not in self._clean_cands:
+                self._clean_cands[(a, t)] = self.ps.candidates(a, t, lambda g: self.gw.cid(g.fid) in self.s_cids)
+            cands = self._clean_cands[(a, t)]
+            if not cands:
+                continue
+            c = self.rng.choice(cands)
+            pid = _pid(c["program"])
+            if pid in self.seen or any(self.gw.cid(x.fid) not in self.gs_cids for x in c["facts"]):
+                continue
+            res = self._run(c)
+            if res and res[1].unique and answers_equal(res[1].answer, res[0]):
+                self.seen.add(pid)
+                p = self.ps._make(pid, t, a, c, res[0])
+                p.group = "clean"
+                out.append(p)
+        return out
+
+    def sample(self, anchors: list[str], defects: list[dict], n_defective: int, n_clean: int,
+               type_weights: dict[str, float], max_per_defect: int = 2, max_tries: int = 50) -> tuple[list[Path], dict]:
+        types = [t for t in type_weights if type_weights[t] > 0]
+        weights = [type_weights[t] for t in types]
+        scope = set(anchors)
+        corrupt = sorted((d for d in defects if d["op"] == "corrupt" and d["subject"] in scope), key=lambda d: d["defect_id"])
+        self.rng.shuffle(corrupt)
+        defective: list[Path] = []
+        used: Counter = Counter()
+        for _ in range(max_per_defect):
+            for d in corrupt:
+                if len(defective) >= n_defective:
+                    break
+                p = self._defective(d, types, weights, max_tries)
+                if p:
+                    defective.append(p)
+                    used[d["defect_id"]] += 1
+        by_cid = {d["cid_after"]: d["defect_id"] for d in defects if d.get("cid_after")}
+        for p in defective:
+            p.defect_ids = sorted({by_cid[c] for c in p.fact_cids if c in by_cid})
+        mix = Counter(p.ptype for p in defective) if defective else dict(zip(types, weights))
+        quota = _allocate(mix, n_clean)
+        clean: list[Path] = []
+        for t in sorted(quota):
+            clean += self._clean(anchors, t, quota[t], max_tries)
+        for t in _weighted_order(self.rng, types, weights):  # top up from the overall mix if a type ran short
+            if len(clean) >= n_clean:
+                break
+            clean += self._clean(anchors, t, n_clean - len(clean), max_tries)
+        stats = {"corrupt_defects_in_scope": len(corrupt), "defects_with_a_path": len(used),
+                 "defective": dict(Counter(p.ptype for p in defective)), "clean": dict(Counter(p.ptype for p in clean)),
+                 "n_defective": len(defective), "n_clean": len(clean)}
+        return defective + clean, stats
 
 
 def describe_program(store: KBStore, program: list[dict]) -> str:

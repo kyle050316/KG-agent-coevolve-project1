@@ -22,7 +22,10 @@ llm:
     enable_thinking: false
     vllm_extras: true
     concurrency: 32
-  challenger: {}
+  challenger:                        # greedy decoding: one deterministic decision per path / entity
+    temperature: 0.0
+    top_p: 1.0
+    presence_penalty: 0.0
   solver: {}
   curator: {}
   judge:                             # prefer a different model family (e.g. an API model) to avoid self-preference
@@ -46,28 +49,32 @@ support:
   audit_n: 50                        # human precision check of S (target precision >= 95%)
 
 defects:
-  rates: [0.3]                       # one defect rate (extended.yaml adds a B0 dose-response)
-  main_rate: 0.3
+  rate: 0.3                          # share of S facts of region A that are deleted or corrupted
   seeds: [0]
   delete_frac: 0.5
   similar_frac: 0.5                  # share of type-consistent ("similar") corruptions
 
-paths_sampling:
-  n: 200                             # Mode A paths per seed (shared by all conditions)
-  n_sweep: 300                       # B0-only paths for other rates (only if rates has more than one value)
+paths_sampling:                      # directed sampling, shared by all conditions (see kb/paths.py DirectedSampler)
+  n_defective: 100                   # paths through a corrupted fact whose G* answer differs from the Gw answer
+  n_clean: 100                       # paths with no changed fact, first hop in S, same answer on Gw and G*
+  max_per_defect: 2                  # paths per corrupted fact (a second one only if the first pass falls short)
   type_weights: {attr: 0.15, rel: 0.15, attr_qual: 0.05, rel_qual: 0.1, rel_attr: 0.3, rel_rel: 0.15, rel_relqual: 0.1}
 
 exp1:
-  # C1 = KG only, C2 = KG + documents, C3 = KG + reference KG. B0 = no-LLM template baseline (free).
-  # Optional (extended.yaml): C2link (documents with entity links) and C0 (closed-book probe).
-  evidence: {k_per_fact: 3, max_page_passages: 12}
-  probe: {enabled: false, k: 2}      # C0 closed-book probe
-  mode_a: {conditions: [B0, C1, C2, C3], samples: 1}
-  mode_b: {conditions: [C1, C2, C3], n_entities: 100, samples: 1}
+  # B0 = no-LLM template baseline; C1 = KG only; C1know = KG only + the Challenger's own knowledge;
+  # C2 = KG + documents (the gold passages of S are always shown, mixed with distractor passages);
+  # C3 = KG + reference KG (oracle). Only C1know may use background knowledge.
+  # Reporting is counts only; statistical tests are to be added later.
+  evidence: {k_per_fact: 3, mode_b_distractors: 4}   # C2 Mode A: gold + BM25 distractors = 3 passages per path fact;
+                                                     # C2 Mode B: all S passages of the entity + 4 other page passages
+  probe: {enabled: false, k: 2}      # optional C0 closed-book probe of every S fact (adds "known" strata)
+  mode_a: {conditions: [B0, C1, C1know, C2, C3], samples: 1}
+  mode_b: {conditions: [C1, C1know, C2, C3], n_entities: 100, samples: 1}
   gap_tasks: {max_per_entity: 1}
-  judge: {max_tasks: 600}
-  solver: {n_per_condition: 50, k: 2, settings: [gw, gstar, closed], max_attempts: 2, fewshot_pool: 20000}
-  audit: {e3_n: 60, natural_n: 50}
+  judge: {max_tasks: null}           # judge every task; the judge is the same model (only one model is available)
+  solver: {n_per_group: 40, k: 8, settings: [gw, gstar, closed], max_attempts: 2, fewshot_pool: 20000}
+                                     # n_per_group tasks per (condition, source: mode_a | gap), k samples per setting
+  audit: {e3_n: 60}                  # optional human audit of the judge
 
 exp2:
   # Three classes: missing_fact, wrong_fact (one sandboxed defect on a gold-path fact) and non_kg.
