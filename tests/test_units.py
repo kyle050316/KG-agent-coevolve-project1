@@ -79,6 +79,26 @@ def test_support_and_defects(store):
     assert all(x.in_support for x in d1)
     fids = [x.fid for x in d1]
     assert len(fids) == len(set(fids))
+    assert all(x.kind in ("attr", "rel") for x in d1)  # no qualifier defects
+
+
+def test_defects_skip_duplicates_and_pass_self_check():
+    from kgcoevo.data.defects import build_gw, editable, self_check
+    from kgcoevo.kb.executor import Executor
+    from tests.fixtures.mini import make_kb
+    kb = make_kb()
+    # a second "educated at Harvard" with another qualifier: deleting either copy would change no answer
+    kb["entities"]["Q76"]["relations"].append({"relation": "educated at", "direction": "forward", "object": "Q13371",
+                                               "qualifiers": {"academic degree": [{"type": "string", "value": "JD"}]}})
+    store = KBStore(kb)
+    dup = [f for f in store.rel_out("Q76", "educated at") if f.value == "Q13371"]
+    assert len(dup) == 2 and not any(editable(store, f) for f in dup)
+    recs = [{"fid": f.fid, "subject": f.subject, "supported": True} for f in store.facts.values()
+            if f.subject in ("Q76", "Q13133")]
+    defects = inject_defects(store, recs, rate=1.0, seed=0, scope=["Q76", "Q13133"])
+    assert defects and not any(d.fid in {f.fid for f in dup} for d in defects)
+    gw = KBStore(build_gw(store, defects), normalized=True)
+    assert self_check(store, gw, Executor.from_store(gw), defects)["n_failed"] == 0
 
 
 def test_rule_checks():

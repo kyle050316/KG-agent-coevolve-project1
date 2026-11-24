@@ -2,7 +2,10 @@
 
 Protocol (following KG error-detection practice, e.g. CKRL/CAGED, and IKGQA in Generate-on-Graph):
 * defects are sampled from S (document-supported facts) within a scope of entities, at a given
-  rate;
+  rate; only attribute and relation facts that a single edit makes visible are eligible: no
+  qualifiers (a qualifier edit also changes its parent fact, and two qualifier edits of one fact
+  conflict) and no fact with a duplicate of the same (subject, key, value) (e.g. "educated at" the
+  same school twice with different qualifiers: deleting one copy changes no answer);
 * deletions and corruptions are split 1:1 by default;
 * corruptions are either "similar" (type-consistent, plausible: same-concept entity that already
   appears as an object of the same relation; nearby dates/years; quantities within +-10-30%;
@@ -144,6 +147,13 @@ def make_defect(store: KBStore, f: Fact, op: str, rng: random.Random, hardness: 
                   bool(rec.get("supported", False)), list(rec.get("passage_ids", [])), edit.to_json())
 
 
+def editable(store: KBStore, f: Fact) -> bool:
+    """True if deleting or corrupting ``f`` alone is visible in the KG (see module docstring)."""
+    if f.kind not in ("attr", "rel"):
+        return False
+    return sum(1 for g in store.facts_of(f.subject, (f.kind,)) if g.key == f.key and g.vstr == f.vstr) == 1
+
+
 def inject_defects(store: KBStore, support_records: list[dict], *, rate: float, seed: int, scope: list[str],
                    delete_frac: float = 0.5, similar_frac: float = 0.5, n_unsupported: int = 0,
                    prefix: str = "d") -> list[Defect]:
@@ -152,7 +162,8 @@ def inject_defects(store: KBStore, support_records: list[dict], *, rate: float, 
     support = {r["fid"]: r for r in support_records}
     functional = store.functional_keys()
     scope_set = set(scope)
-    eligible = sorted(r["fid"] for r in support_records if r["supported"] and r["subject"] in scope_set)
+    eligible = sorted(r["fid"] for r in support_records
+                      if r["supported"] and r["subject"] in scope_set and editable(store, store.facts[r["fid"]]))
     rng.shuffle(eligible)
     n = round(rate * len(eligible))
     n_del = round(n * delete_frac)
@@ -181,7 +192,8 @@ def inject_defects(store: KBStore, support_records: list[dict], *, rate: float, 
     take(eligible, "delete", n_del, True)
     take(eligible, "corrupt", n - n_del, True)
     if n_unsupported:
-        unsup = sorted(r["fid"] for r in support_records if not r["supported"] and r["subject"] in scope_set)
+        unsup = sorted(r["fid"] for r in support_records
+                       if not r["supported"] and r["subject"] in scope_set and editable(store, store.facts[r["fid"]]))
         rng.shuffle(unsup)
         take(unsup, "delete", n_unsupported // 2, False)
         take(unsup, "corrupt", n_unsupported - n_unsupported // 2, False)
