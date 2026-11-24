@@ -179,9 +179,12 @@ pytest -q          # 30 tests, incl. an end-to-end run of every stage on a tiny 
 
 ### Colab, one A100 (80 GB recommended) or H100
 
+The simplest route is [`notebooks/colab_exp1.ipynb`](notebooks/colab_exp1.ipynb): it keeps work dirs, KILT pages and logs on
+Drive, and the code, KQA Pro, the vLLM venv and the model weights on the Colab disk. The commands below do the same by hand.
+
 ```bash
 pip install -e . && pip install vllm                    # a vLLM release that supports Qwen3.5
-bash scripts/download_data.sh data                     # official KQA Pro release -> data/kqapro
+bash scripts/download_data.sh data                     # KQA Pro release (HF mirror) -> data/kqapro
 nohup bash scripts/serve_vllm.sh > vllm.log 2>&1 &     # A100 40GB: MAX_SEQS=32 bash scripts/serve_vllm.sh
 bash scripts/wait_for_server.sh
 
