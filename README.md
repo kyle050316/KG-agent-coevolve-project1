@@ -131,7 +131,7 @@ rate) and tasks that fail even on G\*.
 git clone https://github.com/kyle050316/KG-agent-coevolve-project1.git
 cd KG-agent-coevolve-project1
 pip install -e ".[dev]"
-pytest -q          # 27 tests, incl. an end-to-end run of every stage on a tiny KB with a scripted LLM
+pytest -q          # 28 tests, incl. an end-to-end run of every stage on a tiny KB with a scripted LLM
 ```
 
 ### Colab, one A100 (80 GB recommended)
@@ -162,10 +162,37 @@ All stages are resumable: re-running a command skips items that are already in i
 avoids self-preference. To use one, point `llm.judge.base_url/model/api_key` at it and set
 `llm.judge.vllm_extras=false` for hosted APIs.
 
+### Minimal Exp 1 only (`configs/exp1_min.yaml`)
+
+Runs C1 (KG), C2 (KG + documents) and C3 (KG + reference KG), plus B0, which needs no GPU, at one
+defect rate, one seed, 200 paths and 100 entities. Exp 2 and the closed-book probe are not run.
+Estimated LLM time is about 1.2 h on an A100 80GB; plan for about 3 h including model loading and the pilot.
+
+```bash
+# Step 1: data preparation, CPU only. A CPU runtime is enough, so no GPU compute units are used.
+#         Streams KILT once, takes about 30-60 min. Write to Drive so step 2 can reuse it.
+bash scripts/run_exp1_min.sh prepare paths.work_dir=/content/drive/MyDrive/kgcoevo/exp1_min \
+     paths.kilt_pages=/content/drive/MyDrive/kgcoevo/kilt/kb_pages.jsonl \
+     paths.kqapro_dir=/content/drive/MyDrive/kgcoevo/kqapro
+# Step 2: switch to an A100 runtime, start vLLM, then
+bash scripts/run_exp1_min.sh run paths.work_dir=/content/drive/MyDrive/kgcoevo/exp1_min \
+     paths.kilt_pages=/content/drive/MyDrive/kgcoevo/kilt/kb_pages.jsonl \
+     paths.kqapro_dir=/content/drive/MyDrive/kgcoevo/kqapro
+```
+
+**Colab notes.**
+
+* The official FAQ caps free notebooks at 12 h and Pro+ at 24 h of continuous execution. Runtimes can end
+  earlier when idle or when compute units run out, and files on the VM are lost. Keep `work_dir` on Drive;
+  every stage resumes where it stopped.
+* An A100 runtime consumes compute units from the moment it is connected. Run `prepare` on a CPU runtime and
+  stop the GPU runtime as soon as the run finishes.
+
 ### Configs
 
 | File | Use |
 |---|---|
+| `configs/exp1_min.yaml` | Exp 1 only, C1/C2/C3 (+ free B0), one rate and seed, about 1.2 GPU-h |
 | `configs/small.yaml` | 2-day plan: 1 defect seed, B0/C1/C2/C3, Solver k=2, smaller Exp 2 |
 | `configs/full.yaml` | full design: 3 seeds, + C2link, Solver k=4, larger audits |
 | `configs/base.yaml` | all defaults with comments |

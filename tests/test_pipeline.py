@@ -82,9 +82,7 @@ class Script:
         raise AssertionError(f"unexpected task {t}")
 
 
-@pytest.fixture(scope="module")
-def run_dir(tmp_path_factory):
-    d = tmp_path_factory.mktemp("e2e")
+def _make_run(d, mutate=None):
     kq = d / "kqapro"
     kq.mkdir()
     (kq / "kb.json").write_text(json.dumps(make_kb()))
@@ -103,8 +101,15 @@ def run_dir(tmp_path_factory):
     cfg["exp1"]["audit"] = {"e3_n": 6, "natural_n": 5}
     cfg["exp2"].update({"pool_size": 50, "k": 2, "ablation_n": 6, "samples": 1, "locality_n": 10, "solver_locality_edits": 2,
                         "targets": {"missing_fact": 3, "wrong_fact": 3, "non_kg": 2, "invalid_task": 2, "non_kg_offpath": 2, "refer": 2}})
+    if mutate:
+        mutate(cfg)
     (d / "cfg.yaml").write_text(yaml.safe_dump(cfg))
     return d
+
+
+@pytest.fixture(scope="module")
+def run_dir(tmp_path_factory):
+    return _make_run(tmp_path_factory.mktemp("e2e"))
 
 
 def _args(d, stages):
@@ -156,3 +161,34 @@ def test_end_to_end(run_dir, capsys):
     a2.main()
     rep2 = (run_dir / "run" / "results" / "exp2_report.md").read_text()
     assert "Gate behaviour" in rep2 and "Locality" in rep2
+
+
+def test_exp1_minimal_config(tmp_path):
+    """configs/exp1_min.yaml shape: one rate, B0/C1/C2/C3, no C0 probe, no closed-book Solver setting."""
+    import sys
+
+    from experiments.exp1 import analyze as a1, prepare, run as r1
+    from kgcoevo.config import load_config
+    from kgcoevo.context import Context
+
+    def mutate(cfg):
+        cfg["defects"].update({"rates": [0.6], "main_rate": 0.6})
+        cfg["exp1"]["mode_a"]["conditions"] = ["B0", "C1", "C2", "C3"]
+        cfg["exp1"]["solver"]["settings"] = ["gw", "gstar"]
+
+    d = _make_run(tmp_path, mutate)
+    sys.argv = ["prepare", "--config", str(d / "cfg.yaml"), "--stages", "kilt", "region", "passages", "support",
+                "defects", "paths"]
+    prepare.main()
+    script = Script()
+    for p in Context(load_config(d / "cfg.yaml")).paths(0.6, 0):
+        script.paths[p["description"]] = p
+    llms = {r: MockLLM(script, r) for r in ("challenger", "solver", "curator", "judge")}
+    r1.main(llms, _args(d, ["mode_a", "mode_b", "gap_tasks", "checks", "judge", "solver"]))
+    assert not (d / "run" / "exp1" / "probe.jsonl").exists()
+    sys.argv = ["x", "--config", str(d / "cfg.yaml")]
+    a1.main()
+    rep = (d / "run" / "results" / "exp1_report.md").read_text()
+    assert "| C3 |" in rep and "C2link" not in rep
+    quality = rep.split("## Task quality (Solver)")[1]
+    assert "n/a" in quality  # closed-book columns are reported as not run

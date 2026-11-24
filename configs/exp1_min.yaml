@@ -1,0 +1,20 @@
+# Minimal Exp 1 (2-day plan, one A100): KG only (C1), KG + documents (C2), KG + reference KG (C3).
+# B0 is the no-LLM template baseline: it costs no GPU time and is the reference line for
+# contamination; remove it from mode_a.conditions if you do not want it.
+# No closed-book probe (C0), one defect rate, one seed, fewer paths/entities, Exp 2 not run.
+extends: base.yaml
+paths:
+  work_dir: runs/exp1_min
+defects:
+  rates: [0.3]
+  main_rate: 0.3
+  seeds: [0]
+paths_sampling:
+  n: 200
+exp1:
+  mode_a: {conditions: [B0, C1, C2, C3], samples: 1}
+  mode_b: {conditions: [C1, C2, C3], n_entities: 100, samples: 1}
+  gap_tasks: {max_per_entity: 1}
+  judge: {max_tasks: 600}
+  solver: {n_per_condition: 50, k: 2, settings: [gw, gstar, closed]}
+  audit: {e3_n: 60, natural_n: 50}

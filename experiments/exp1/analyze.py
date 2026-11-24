@@ -276,6 +276,7 @@ def section_quality(ctx: Context, S: dict) -> str:
         t = tasks[r["task_id"]]
         acc[(r["task_id"], r["setting"])].append(int(match_any(r.get("answer", ""), t["gs_answers"])))
     hi, lo = math.ceil(0.75 * k), math.floor(0.25 * k)
+    settings = set(ctx.cfg["exp1"]["solver"]["settings"])
     rows = []
     for c in [x for x in LLM_ORDER if any(t["condition"] == x for t in tasks.values())]:
         ids = sorted({tid for tid, _ in acc if tasks[tid]["condition"] == c})
@@ -283,12 +284,15 @@ def section_quality(ctx: Context, S: dict) -> str:
             continue
         cl = [tasks[i]["cluster"] for i in ids]
         g = {s: [sum(acc.get((i, s), [])) for i in ids] for s in ("gw", "gstar", "closed")}
-        gap_dep = [int(gs >= hi and gw <= lo) for gs, gw in zip(g["gstar"], g["gw"])]
-        leak = [int(x >= hi) for x in g["closed"]]
-        frontier = [int(lo < x < hi) if k > 1 else 0 for x in g["gstar"]]
-        unanswerable = [int(x == 0) for x in g["gstar"]]
-        rows.append([c, len(ids), _ci([x / k for x in g["gstar"]], cl), _ci([x / k for x in g["gw"]], cl),
-                     _ci([x / k for x in g["closed"]], cl), _ci(gap_dep, cl), _ci(leak, cl), _ci(frontier, cl), _ci(unanswerable, cl)])
+
+        def ci(vals: list, *need: str) -> str:  # n/a when a required setting was not run
+            return _ci(vals, cl) if all(n in settings for n in need) else "n/a"
+        rows.append([c, len(ids), ci([x / k for x in g["gstar"]], "gstar"), ci([x / k for x in g["gw"]], "gw"),
+                     ci([x / k for x in g["closed"]], "closed"),
+                     ci([int(gs >= hi and gw <= lo) for gs, gw in zip(g["gstar"], g["gw"])], "gw", "gstar"),
+                     ci([int(x >= hi) for x in g["closed"]], "closed"),
+                     ci([int(lo < x < hi) if k > 1 else 0 for x in g["gstar"]], "gstar"),
+                     ci([int(x == 0) for x in g["gstar"]], "gstar")])
     S["quality"] = rows
     return _md(["cond", "tasks", "Solver acc on G*", "acc on Gw", "closed-book acc", "gap-dependent", "closed-book leak",
                 "frontier (25-75%)", "fails even on G*"], rows)
