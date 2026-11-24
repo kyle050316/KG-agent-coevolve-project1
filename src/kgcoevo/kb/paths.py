@@ -393,7 +393,7 @@ def describe_program(store: KBStore, program: list[dict]) -> str:
     """Numbered natural-language rendering of a KoPL program (for prompts and judges)."""
     lines = []
     for i, st in enumerate(program, 1):
-        fn, inp = st["function"], st.get("inputs", [])
+        fn, inp = st["function"], [str(x) for x in st.get("inputs", [])]  # LLM programs may use numbers
         if fn == "Find":
             lines.append(f"{i}. Find the entity named '{inp[0]}'.")
         elif fn == "FilterConcept":

@@ -159,3 +159,9 @@ def test_directed_sampler(store, executor):
     assert len(cln) == 4 and {p.ptype for p in cln} == {p.ptype for p in dfc}  # clean paths follow the defective type mix
     for p in cln:
         assert new_cid not in p.fact_cids and executor.run(p.program).answers == [p.answer_gw]
+
+
+def test_describe_program_accepts_numeric_inputs(store):
+    from kgcoevo.kb.paths import describe_program
+    txt = describe_program(store, [{"function": "FindAll", "inputs": []}, {"function": "FilterNum", "inputs": ["population", 1000, ">"]}])
+    assert "FilterNum(population, 1000, >)" in txt
