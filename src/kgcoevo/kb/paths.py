@@ -90,10 +90,14 @@ def _single(facts: list[Fact], key: str) -> Fact | None:
 
 
 class PathSampler:
-    def __init__(self, store: KBStore, executor: Executor, seed: int = 0):
+    def __init__(self, store: KBStore, executor: Executor, seed: int = 0, single_target: bool = False):
+        """``single_target``: every Relate step must reach exactly one entity, so no FilterConcept is
+        needed to pick one of several values (a question cannot express that filter and would be
+        ambiguous, e.g. "where was X educated?" for someone with two schools)."""
         self.store = store
         self.ex = executor
         self.rng = random.Random(seed)
+        self.single_target = single_target
         self._steps: dict[tuple, tuple[set, Counter]] = {}
 
     def _relate(self, src: str, rel: str, direction: str, dst: str) -> list[dict] | None:
@@ -114,6 +118,8 @@ class PathSampler:
             return None
         if len(targets) == 1:
             return [step("Relate", rel, direction)]
+        if self.single_target:
+            return None
         for cid in self.store.all_concepts(dst):
             cname = self.store.concepts[cid]["name"]
             if names[cname] == 1:
@@ -280,6 +286,8 @@ class DirectedSampler:
                answer: the program has a unique answer on G* that differs from the Gw answer.
     clean      no path fact is changed, the first-hop fact is in S (stated in the documents), and the
                program has the same unique answer on Gw and G*.
+    Every Relate step reaches a single entity (no FilterConcept among several values), so the
+    natural-language question has one answer.
 
     Both groups have a unique G* answer and a text-supported first hop, so detection on defective
     paths and false alarms on clean paths are measured on comparable facts. Clean paths follow the
@@ -290,7 +298,7 @@ class DirectedSampler:
     def __init__(self, gw: KBStore, gw_exec: Executor, gs_exec: Executor, gs_cids: set[str], s_cids: set[str],
                  seed: int = 0):
         self.gw = gw
-        self.ps = PathSampler(gw, gw_exec, seed=seed)
+        self.ps = PathSampler(gw, gw_exec, seed=seed, single_target=True)
         self.gwx, self.gsx = gw_exec, gs_exec
         self.gs_cids, self.s_cids = gs_cids, s_cids
         self.rng = random.Random(seed)
@@ -393,7 +401,9 @@ def describe_program(store: KBStore, program: list[dict]) -> str:
     """Numbered natural-language rendering of a KoPL program (for prompts and judges)."""
     lines = []
     for i, st in enumerate(program, 1):
-        fn, inp = st["function"], [str(x) for x in st.get("inputs", [])]  # LLM programs may use numbers
+        fn = st["function"]
+        raw = st.get("inputs", [])
+        inp = [str(x) for x in raw] + ["?"] * 3  # LLM programs may use numbers or omit inputs
         if fn == "Find":
             lines.append(f"{i}. Find the entity named '{inp[0]}'.")
         elif fn == "FilterConcept":
@@ -410,7 +420,7 @@ def describe_program(store: KBStore, program: list[dict]) -> str:
         elif fn == "QueryRelationQualifier":
             lines.append(f"{i}. For the relation '{inp[0]}' between the two entities above, return the qualifier '{inp[1]}'.")
         else:
-            lines.append(f"{i}. {fn}({', '.join(inp)})")
+            lines.append(f"{i}. {fn}({', '.join(str(x) for x in raw)})")
     return "\n".join(lines)
 
 

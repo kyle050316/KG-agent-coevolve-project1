@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import random
+import re
 
 from kgcoevo.agents.evidence import EvidenceBuilder
 from kgcoevo.eval.discovery import KeyResolver, resolve_entities
@@ -12,6 +14,20 @@ from kgcoevo.llm.parsing import extract_json
 from kgcoevo.llm.prompts import messages
 
 DECISIONS = ("accept", "correct", "reject")
+_FIELD = {k: re.compile(rf'"{k}"\s*:\s*"((?:[^"\\]|\\.)*)"') for k in ("decision", "question", "answer")}
+
+
+def _top_fields(raw: str | None) -> dict:
+    """Top-level string fields of a JSON reply that was cut off (e.g. at max_tokens), by regex."""
+    out = {}
+    for k, rx in _FIELD.items():
+        m = rx.search(raw or "")
+        if m:
+            try:
+                out[k] = json.loads(f'"{m.group(1)}"')
+            except json.JSONDecodeError:
+                out[k] = m.group(1)
+    return out
 
 
 def _names(store: KBStore, ids: list[str]) -> str:
@@ -30,6 +46,8 @@ async def mode_a(llm, path: dict, cond: str, evb: EvidenceBuilder | None, gw: KB
                     mention_names=_names(gw, path["mention"]), hidden_names=_names(gw, path["hidden"]))
     raw = await llm.chat(msgs, seed=seed)
     js = extract_json(raw) or {}
+    if "decision" not in js:  # truncated or malformed outer object: recover the top-level fields
+        js = {**js, **_top_fields(raw)}
     decision = str(js.get("decision", "")).strip().lower()
     return {**base, "decision": decision if decision in DECISIONS else "invalid",
             "question": str(js.get("question", "") or ""), "answer": str(js.get("answer", "") or ""),

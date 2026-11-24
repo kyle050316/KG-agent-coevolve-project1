@@ -18,6 +18,8 @@ one question with a correct answer key, or reject it.
    - "accept": the path facts look correct; the answer key is the final value the path yields in the working KG.
    - "correct": a path fact is contradicted by explicit evidence and the evidence lets you state the correct final answer.
    - "reject": a path fact is contradicted or doubtful and you cannot state the correct final answer.
+   If an intermediate entity is wrong, the correct final answer is the value for the right entity; if the
+   evidence does not state that value, choose "reject".
 3. For "accept" or "correct", write ONE natural English question whose answer is exactly the final value of the path.
    The question must name: {{mention_names}}
    The question must NOT name these intermediate entities: {{hidden_names}}
@@ -28,5 +30,4 @@ Return only a JSON object:
 {"decision": "accept|correct|reject",
  "question": "<question, or empty if rejected>",
  "answer": "<final answer, or empty if rejected>",
- "suspect_facts": [{"fact_index": <int>, "issue": "conflict|missing|unsupported", "evidence_id": "<id>", "correct_value": "<value or empty>"}],
- "rationale": "<one sentence>"}
+ "suspect_facts": [{"fact_index": <int>, "issue": "conflict|missing|unsupported", "evidence_id": "<id>", "correct_value": "<value or empty>"}]}

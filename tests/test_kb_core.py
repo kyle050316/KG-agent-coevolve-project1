@@ -134,7 +134,7 @@ def test_path_sampler(store, executor):
 
 
 def test_memoised_relate_matches_relate_steps(store, executor):
-    ps = PathSampler(store, executor)
+    ps = PathSampler(store, executor)  # single_target=False: same result as relate_steps
     for f in store.facts.values():
         if f.kind == "rel":
             for src, d, dst in ((f.subject, "forward", f.value), (f.value, "backward", f.subject)):
@@ -161,7 +161,23 @@ def test_directed_sampler(store, executor):
         assert new_cid not in p.fact_cids and executor.run(p.program).answers == [p.answer_gw]
 
 
+def test_single_target_paths(store, executor):
+    ps = PathSampler(store, executor, single_target=True)
+    for t in ("rel", "rel_attr", "rel_rel"):
+        for c in ps.candidates("Q76", t):
+            assert not any(s["function"] == "FilterConcept" for s in c["program"][1:]), c["program"]
+    # Obama attended two universities: "educated at" is not a single-target step
+    assert not [c for c in ps.candidates("Q76", "rel") if c["program"][-2]["inputs"][:1] == ["educated at"]]
+
+
+def test_mode_a_recovers_truncated_json():
+    from kgcoevo.agents.challenger import _top_fields
+    raw = '{"decision": "correct", "question": "Who is \\"X\\"?", "answer": "Paris", "suspect_facts": [{"fact_index": 0, "evi'
+    assert _top_fields(raw) == {"decision": "correct", "question": 'Who is "X"?', "answer": "Paris"}
+
+
 def test_describe_program_accepts_numeric_inputs(store):
     from kgcoevo.kb.paths import describe_program
     txt = describe_program(store, [{"function": "FindAll", "inputs": []}, {"function": "FilterNum", "inputs": ["population", 1000, ">"]}])
     assert "FilterNum(population, 1000, >)" in txt
+    assert describe_program(store, [{"function": "Find", "inputs": []}, {"function": "Relate", "inputs": ["spouse"]}])
