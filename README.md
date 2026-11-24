@@ -306,21 +306,3 @@ tests/             unit tests + end-to-end pipeline test on a fixture KB
 * Qwen3.5-9B model card. 2026.
 
 ---
-
-## 中文简介
-
-本仓库实现 Project 1 的实验 1 和实验 2（简化版）。
-
-* **实验 1（Challenger）**：比较 C1（只看 KG）、C2（KG + 文档）、C3（KG + 参考 KG），外加不需要 GPU 的
-  B0 模板基线。衡量 KG 有缺陷时出题的答案键污染率（Mode A），以及能否借助文档发现缺陷（Mode B）。
-  C0、C2link 和多缺陷率在 `configs/extended.yaml` 中可选。
-* **实验 2（Curator）**：三类病例，即缺失（missing_fact）、错误（wrong_fact）和非 KG 错误（non_kg）。
-  * 触发：T1 = Solver 答错；T2 = Solver 的 KG 执行没有返回答案。T2 用于发现 Solver 凭记忆答对、
-    但 KG 仍有缺陷的“静默”病例。
-  * Curator 由 prompt 实现，先诊断并提出单条修改；反事实重跑只是工具，结果返回给模型，
-    由模型决定提交、修改或撤回，不作为硬性门槛。
-  * 来源 gate 要求引用展示过的段落，并由独立验证器确认。主指标是被接受的精确修复率，同时报告
-    non_kg 上的误修改率、locality 和 portability。
-* 答案、检查和评分全部通过官方 KoPL 引擎执行程序得到。只有题干忠实性和段落蕴含这类执行无法判断的部分
-  才用 LLM，并配合人工审核。
-* 先用 `configs/pilot.yaml` 跑 pilot，再用 `configs/main.yaml` 跑主实验；所有阶段都可续跑，适合 Colab。
