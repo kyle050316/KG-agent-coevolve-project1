@@ -4,7 +4,7 @@
 #
 #   CFG=configs/pilot.yaml bash scripts/run.sh all          # pilot first (about 30-45 min)
 #   bash scripts/run.sh prepare                             # CPU only: KILT pages, regions, S, Gw, paths
-#   bash scripts/run.sh exp1                                # Challenger C1/C2/C3 (+ B0), checks, judge, Solver
+#   bash scripts/run.sh exp1                                # Challenger B0/C1/C1know/C2/C3, checks, judge, Solver
 #   bash scripts/run.sh pool                                # Exp 2 Solver pool on G* (can run right after prepare)
 #   bash scripts/run.sh exp2                                # cases, Curator (full + no_tool), locality, report
 #   bash scripts/run.sh exp1 paths.work_dir=/content/drive/MyDrive/kgcoevo/main   # with an override

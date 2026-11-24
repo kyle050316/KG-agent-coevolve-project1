@@ -1,30 +1,26 @@
 """Scoring of gap reports (Exp 1 Mode B) against the defect log.
 
-Every claimed gap is put into exactly one category:
+Every claimed gap is either correct or an error:
 
-* ``hit``          matches an injected defect (key and true G* value)
-* ``located_only`` names the key of an injected defect but the value is wrong
-* ``false_gap``    the claimed fact is already in Gw
-* ``natural``      not injected, but the cited passage states the claimed value -> a real
-                   gap/conflict of the original KB (excluded from precision; human-audited)
-* ``unsupported``  none of the above (hallucinated or unverifiable claim)
+* ``hit``           matches an injected defect: same key and the true (G*) value
+* ``located_only``  an error that names the key of an injected defect but gives a wrong value that is
+                    not already stored in Gw (found the place, misread the value)
+* ``other``         every other error: the fact is already in Gw, is not in G*, cannot be resolved,
+                    or is a real gap of the original KB (counted as an error: no human audit)
 
-Precision = hit / (hit + located_only + false_gap + unsupported).
-Recall (end-to-end) = detected defects / all defects of the processed entities.
-Recall (exposed) = detected / defects whose gold passage was shown to the model.
-Strict (FEVER-style) = detected with the correct label and a cited gold passage.
+Precision = hit / all claims.
+Recall = detected defects / all defects of the processed entities.
+Label accuracy = detected defects with the right label (missing / conflict) / detected defects.
 """
 
 from __future__ import annotations
 
 import difflib
 
-from kgcoevo.docs.passages import Passage
-from kgcoevo.eval.compare import answers_equal, mentions
+from kgcoevo.eval.compare import answers_equal
 from kgcoevo.kb.store import KBStore
-from kgcoevo.kb.values import surface_forms
 
-PRECISION_CATS = ("hit", "located_only", "false_gap", "unsupported")
+CATEGORIES = ("hit", "located_only", "other")
 
 
 class KeyResolver:
@@ -59,72 +55,40 @@ def _value_matches(store: KBStore, kind: str, claimed: str, true_vstr: str) -> b
     return answers_equal(claimed, true_vstr)
 
 
-def _passage_states(p: Passage | None, claimed: str, store: KBStore, is_rel: bool) -> bool:
-    if p is None or not claimed:
-        return False
-    if is_rel:
-        return mentions(p.text, claimed) or any(store.name(q) == claimed for _, _, q in p.anchors if q in store.entities)
-    forms = [claimed]
-    try:
-        forms += surface_forms({"type": "date", "value": claimed})
-    except Exception:  # noqa: BLE001 - not a date
-        pass
-    return any(mentions(p.text, f) for f in forms)
-
-
 def score_report(gs: KBStore, gw: KBStore, resolver: KeyResolver, entity: str, gaps: list[dict],
-                 defects: list[dict], shown_pids: set[str], passages: dict[str, Passage]) -> dict:
+                 defects: list[dict]) -> dict:
     """Score one entity's gap report. ``defects`` are defect dicts whose subject is ``entity``."""
     claims = []
-    detected: dict[str, dict] = {}
+    detected: dict[str, bool] = {}  # defect_id -> label ok (True if any hit had the right label)
     for g in gaps if isinstance(gaps, list) else []:
         if not isinstance(g, dict):
             continue
         key = resolver(str(g.get("key", "")))
         claimed = str(g.get("claimed_value", "") or "").strip()
         label = str(g.get("label", "")).strip().lower()
-        cited = str(g.get("evidence_id", "") or "")
-        rec = {"key_raw": g.get("key"), "key": key, "claimed_value": claimed, "label": label, "evidence_id": cited}
+        rec = {"key_raw": g.get("key"), "key": key, "claimed_value": claimed, "label": label,
+               "evidence_id": str(g.get("evidence_id", "") or "")}
         if key is None or not claimed:
-            claims.append({**rec, "category": "unsupported", "reason": "unresolved key or empty value"})
+            claims.append({**rec, "category": "other"})
             continue
-        is_rel = key in resolver.rel_keys
-        kind = "rel" if is_rel else "attr"
-        hit = None
-        located = False
+        hit, located = None, False
         for d in defects:
             if d["key"] != key:
                 continue
             located = True
-            dkind = "rel" if d["kind"] == "rel" else "attr"
-            if _value_matches(gs, dkind, claimed, d["before"]):
+            if _value_matches(gs, "rel" if d["kind"] == "rel" else "attr", claimed, d["before"]):
                 hit = d
                 break
-        if hit is not None:
-            want = {"missing"} if hit["op"] == "delete" else ({"conflict"} if hit["functional"] else {"conflict", "missing"})
-            label_ok = label in want
-            strict = label_ok and cited in set(hit.get("passage_ids", []))
-            prev = detected.get(hit["defect_id"])
-            if prev is None or (strict and not prev["strict"]):
-                detected[hit["defect_id"]] = {"label_ok": label_ok, "strict": strict}
-            claims.append({**rec, "category": "hit", "defect_id": hit["defect_id"], "label_ok": label_ok, "strict": strict})
+        if hit is None:
+            kind = "rel" if key in resolver.rel_keys else "attr"
+            in_gw = any(_value_matches(gw, kind, claimed, f.vstr) for f in gw.facts_of(entity, (kind,)) if f.key == key)
+            claims.append({**rec, "category": "located_only" if located and not in_gw else "other"})
             continue
-        if located:
-            claims.append({**rec, "category": "located_only"})
-            continue
-        in_gw = any(_value_matches(gw, kind, claimed, f.vstr) for f in gw.facts_of(entity, (kind,)) if f.key == key)
-        if in_gw:
-            claims.append({**rec, "category": "false_gap"})
-        elif cited in shown_pids and _passage_states(passages.get(cited), claimed, gs, is_rel):
-            claims.append({**rec, "category": "natural"})
-        else:
-            claims.append({**rec, "category": "unsupported"})
-    per_defect = []
-    for d in defects:
-        det = detected.get(d["defect_id"])
-        per_defect.append({
-            "defect_id": d["defect_id"], "op": d["op"], "subtype": d["subtype"], "hardness": d["hardness"],
-            "functional": d["functional"], "exposed": bool(set(d.get("passage_ids", [])) & shown_pids),
-            "detected": det is not None, "label_ok": bool(det and det["label_ok"]), "strict": bool(det and det["strict"]),
-        })
+        want = {"missing"} if hit["op"] == "delete" else ({"conflict"} if hit["functional"] else {"conflict", "missing"})
+        label_ok = label in want
+        detected[hit["defect_id"]] = detected.get(hit["defect_id"], False) or label_ok
+        claims.append({**rec, "category": "hit", "defect_id": hit["defect_id"], "label_ok": label_ok})
+    per_defect = [{"defect_id": d["defect_id"], "op": d["op"], "subtype": d["subtype"], "hardness": d["hardness"],
+                   "functional": d["functional"], "detected": d["defect_id"] in detected,
+                   "label_ok": detected.get(d["defect_id"], False)} for d in defects]
     return {"entity": entity, "claims": claims, "defects": per_defect}

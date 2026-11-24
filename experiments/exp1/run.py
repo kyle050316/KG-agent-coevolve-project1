@@ -2,12 +2,12 @@
 
 Stages (run in this order; every stage is resumable):
   probe      C0: closed-book probe of every supported fact of region A (k samples)
-  mode_a     Challenger on the shared paths under B0/C1/C2/C2link/C3
-  mode_b     Challenger gap reports per entity under C1/C2/C2link/C3
+  mode_a     Challenger on the shared paths (defective + clean) under B0/C1/C1know/C2/C3
+  mode_b     Challenger gap reports per entity under C1/C1know/C2/C3
   gap_tasks  compile reported gaps into tasks and verbalise them
   checks     E0-E5 for every task (official KoPL engine on Gw and G*)
-  judge      LLM-judge faithfulness (E3) on rule-valid tasks
-  solver     Solver on Gw / G* / closed-book for a sample of valid tasks
+  judge      LLM-judge faithfulness (E3) on every rule-valid task
+  solver     Solver on Gw / G* / closed-book, k samples, for a sample of valid tasks per condition and source
 
 Usage:  python -m experiments.exp1.run --config configs/main.yaml --stages mode_a mode_b
 """
@@ -41,7 +41,7 @@ def out(ctx: Context, name: str):
 
 
 def main_rate(ctx: Context) -> float:
-    return ctx.cfg["defects"]["main_rate"]
+    return ctx.cfg["defects"]["rate"]
 
 
 def seeds(ctx: Context) -> list[int]:
@@ -50,8 +50,9 @@ def seeds(ctx: Context) -> list[int]:
 
 def builder(ctx: Context, seed: int) -> EvidenceBuilder:
     ev = E(ctx)["evidence"]
-    return EvidenceBuilder(ctx.gs, ctx.gw(main_rate(ctx), seed), ctx.index, k_per_fact=ev["k_per_fact"],
-                           max_page_passages=ev["max_page_passages"], vocab_entities=ctx.region["A"])
+    return EvidenceBuilder(ctx.gs, ctx.gw(main_rate(ctx), seed), ctx.index, support=ctx.support,
+                           defects=ctx.defects(main_rate(ctx), seed), k_per_fact=ev["k_per_fact"],
+                           mode_b_distractors=ev["mode_b_distractors"], vocab_entities=ctx.region["A"])
 
 
 async def stage_probe(ctx: Context) -> None:
@@ -150,7 +151,7 @@ def stage_checks(ctx: Context) -> None:
                      "answer": r["answer"], "kg_e1": "gw", "e2_applicable": r["decision"] == "accept",
                      "mention_names": [gw.name(e) for e in p["mention"]], "hidden_names": [gw.name(e) for e in p["hidden"]],
                      "description": p["description"], "exposed": p["exposed"], "path_answer_affecting": p["answer_affecting"],
-                     "hops": p["hops"], "ptype": p["ptype"]})
+                     "group": p.get("group", ""), "hops": p["hops"], "ptype": p["ptype"]})
     for r in read_jsonl(out(ctx, "gap_tasks")):
         if "error" in r:
             continue
@@ -175,7 +176,7 @@ async def stage_judge(ctx: Context) -> None:
     tasks = [t for t in read_jsonl(out(ctx, "tasks")) if t.get("e0") and t.get("e1") and t.get("e2") is not False]
     rng = random.Random(ctx.cfg["seed"])
     rng.shuffle(tasks)
-    tasks = tasks[: E(ctx)["judge"]["max_tasks"]]
+    tasks = tasks[: E(ctx)["judge"].get("max_tasks")]  # None = judge every task
 
     async def work(t: dict) -> dict:
         res = await judge_faithfulness(llm, t["description"], t["question"], t["answer"])
@@ -193,11 +194,11 @@ async def stage_solver(ctx: Context) -> None:
     judged = {r["task_id"]: r for r in read_jsonl(out(ctx, "judge"))}
     valid = [t for t in read_jsonl(out(ctx, "tasks")) if t["valid"] and judged.get(t["task_id"], {}).get("faithful") is not False]
     rng = random.Random(ctx.cfg["seed"])
-    picked = []
-    for cond in sorted({t["condition"] for t in valid}):
-        group = [t for t in valid if t["condition"] == cond]
+    picked = []  # n_per_group tasks for each (condition, source): Mode A tasks and gap tasks separately
+    for cond, src in sorted({(t["condition"], t["source"]) for t in valid}):
+        group = [t for t in valid if t["condition"] == cond and t["source"] == src]
         rng.shuffle(group)
-        picked += group[: conf["n_per_condition"]]
+        picked += group[: conf["n_per_group"]]
     items = [{"task": t, "setting": s, "j": j} for t in picked for s in conf["settings"] for j in range(conf["k"])]
 
     async def work(it: dict) -> dict:

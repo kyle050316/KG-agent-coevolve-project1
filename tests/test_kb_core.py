@@ -1,7 +1,7 @@
 import pytest
 
 from kgcoevo.kb.executor import Executor
-from kgcoevo.kb.paths import PathSampler
+from kgcoevo.kb.paths import DirectedSampler, PathSampler, relate_steps
 from kgcoevo.kb.store import Edit, EditError, KBStore, apply_edits
 from kgcoevo.kb.trace import trace
 from kgcoevo.kb.values import surface_forms, value_str
@@ -131,3 +131,31 @@ def test_path_sampler(store, executor):
         for h in p.hidden:
             assert store.name(h) not in p.template_question
     assert {p.hops for p in paths} == {1, 2}
+
+
+def test_memoised_relate_matches_relate_steps(store, executor):
+    ps = PathSampler(store, executor)
+    for f in store.facts.values():
+        if f.kind == "rel":
+            for src, d, dst in ((f.subject, "forward", f.value), (f.value, "backward", f.subject)):
+                assert ps._relate(src, f.key, d, dst) == relate_steps(store, src, f.key, d, dst)
+
+
+def test_directed_sampler(store, executor):
+    f = store.find_fact("attr", "Q76", "date of birth", "1961-08-04")
+    gw = KBStore(apply_edits(store.kb, [Edit.update(store, f, {"type": "date", "value": "1963-08-04"})], store.has_mirrors),
+                 normalized=True)
+    new_cid = gw.cid(gw.find_fact("attr", "Q76", "date of birth", "1963-08-04").fid)
+    defects = [{"defect_id": "d0", "op": "corrupt", "subject": "Q76", "cid_after": new_cid}]
+    s_cids = {store.cid(fid) for fid in store.facts}  # every fact counts as text-supported here
+    sampler = DirectedSampler(gw, Executor.from_store(gw), executor, set(store.cid_to_fid), s_cids, seed=0)
+    paths, stats = sampler.sample(["Q76", "Q13133", "Q22686"], defects, 3, 4, {"attr": 1, "rel": 1, "rel_attr": 1})
+    dfc = [p for p in paths if p.group == "defective"]
+    cln = [p for p in paths if p.group == "clean"]
+    assert dfc and stats["n_defective"] == len(dfc) and stats["defects_with_a_path"] == 1
+    for p in dfc:
+        assert new_cid in p.fact_cids and p.defect_ids == ["d0"]
+        assert executor.run(p.program).answers != [p.answer_gw]
+    assert len(cln) == 4 and {p.ptype for p in cln} == {p.ptype for p in dfc}  # clean paths follow the defective type mix
+    for p in cln:
+        assert new_cid not in p.fact_cids and executor.run(p.program).answers == [p.answer_gw]

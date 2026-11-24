@@ -1,5 +1,5 @@
-# Pilot on real data (about 30-45 min on one A100): checks every stage, prompt formats and parse
-# rates before the main run. Uses its own work dir; the KILT pages file is shared with main.
+# Pilot on real data: checks every stage, prompt formats and parse rates before the main run.
+# Uses its own work dir; the KILT pages file is shared with main.
 extends: base.yaml
 paths:
   work_dir: runs/pilot
@@ -7,12 +7,12 @@ region:
   n_a: 40
   n_b: 60
 paths_sampling:
-  n: 40
+  n_defective: 15
+  n_clean: 15
 exp1:
-  mode_b: {conditions: [C1, C2, C3], n_entities: 20, samples: 1}
-  judge: {max_tasks: 100}
-  solver: {n_per_condition: 15, k: 2}
-  audit: {e3_n: 20, natural_n: 20}
+  mode_b: {conditions: [C1, C1know, C2, C3], n_entities: 20, samples: 1}
+  solver: {n_per_group: 5, k: 8}
+  audit: {e3_n: 20}
 exp2:
   pool_size: 200
   targets: {missing_fact: 20, wrong_fact: 20, non_kg: 20}

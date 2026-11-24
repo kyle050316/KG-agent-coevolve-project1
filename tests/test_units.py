@@ -96,8 +96,11 @@ def test_discovery_categories(store):
                 "passage_ids": ["Q76:1:0"]}]
     gaps = [{"key": "Date of Birth", "claimed_value": "August 4, 1961", "label": "missing", "evidence_id": "Q76:1:0"},
             {"key": "spouse", "claimed_value": "Michelle Obama", "label": "missing", "evidence_id": "Q76:2:0"},
-            {"key": "unknown key", "claimed_value": "x", "label": "missing", "evidence_id": "Q76:1:0"}]
-    sc = score_report(store, gw, KeyResolver(store), "Q76", gaps, defects, {"Q76:1:0"}, {})
+            {"key": "unknown key", "claimed_value": "x", "label": "missing", "evidence_id": "Q76:1:0"},
+            {"key": "date of birth", "claimed_value": "1962-01-01", "label": "missing", "evidence_id": "Q76:1:0"},
+            {"key": "date of birth", "claimed_value": "1961-08-04", "label": "conflict", "evidence_id": "Q76:1:0"}]
+    sc = score_report(store, gw, KeyResolver(store), "Q76", gaps, defects)
     cats = [c["category"] for c in sc["claims"]]
-    assert cats == ["hit", "false_gap", "unsupported"]
-    assert sc["defects"][0]["detected"] and sc["defects"][0]["strict"] and sc["defects"][0]["exposed"]
+    # already in Gw / unresolvable key -> other; right key, wrong value -> located_only; second hit with a wrong label
+    assert cats == ["hit", "other", "other", "located_only", "hit"]
+    assert sc["defects"][0]["detected"] and sc["defects"][0]["label_ok"]

@@ -5,8 +5,8 @@ Stages
   region    choose anchor entities, split into region A (Exp 1) and region B (Exp 2)
   passages  chunk pages of region entities and their neighbours into passages (with gold links)
   support   build S (document-supported facts) + an audit sample for the human check
-  defects   inject defects into S (region A) for every (rate, seed); build Gw; self-check
-  paths     sample Mode A paths on Gw, annotate exposure / answer-affecting / G* answers
+  defects   inject defects into S (region A) for every seed; build Gw; self-check
+  paths     sample Mode A paths on Gw in two groups (defective / clean), annotate G* answers
   probe     closed-book probe items (C0) for every supported fact of region A
 
 Usage:  python -m experiments.exp1.prepare --config configs/main.yaml [--stages ...]
@@ -27,7 +27,7 @@ from kgcoevo.docs.kilt import extract_kb_pages, page_words
 from kgcoevo.docs.passages import build_passages, save_passages
 from kgcoevo.eval.compare import answers_equal
 from kgcoevo.kb.executor import Executor
-from kgcoevo.kb.paths import PathSampler
+from kgcoevo.kb.paths import DirectedSampler
 from kgcoevo.kb.store import KBStore
 from kgcoevo.runner import write_json, write_jsonl
 
@@ -91,20 +91,20 @@ def stage_support(ctx: Context) -> None:
 def stage_defects(ctx: Context) -> None:
     d = ctx.cfg["defects"]
     reg = ctx.region
-    for rate in d["rates"]:
-        for seed in d["seeds"]:
-            out = ctx.gw_dir(rate, seed)
-            defects = inject_defects(ctx.gs, ctx.support, rate=rate, seed=seed * 1000,  # shared order -> (nearly) nested rates
-                                     scope=reg["A"], delete_frac=d["delete_frac"], similar_frac=d["similar_frac"])
-            kb = build_gw(ctx.gs, defects)
-            write_json(kb, out / "kb.json")
-            write_jsonl([x.to_json() for x in defects], out / "defects.jsonl")
-            gw = KBStore(kb, normalized=True)
-            check = self_check(ctx.gs, gw, Executor.from_store(gw), defects)
-            write_json(check, out / "selfcheck.json")
-            print(f"[defects] {rate_tag(rate, seed)}: {len(defects)} defects, self-check failures={check['n_failed']}")
-            if check["n_failed"]:
-                raise SystemExit("self-check failed: see selfcheck.json")
+    rate = d["rate"]
+    for seed in d["seeds"]:
+        out = ctx.gw_dir(rate, seed)
+        defects = inject_defects(ctx.gs, ctx.support, rate=rate, seed=seed * 1000, scope=reg["A"],
+                                 delete_frac=d["delete_frac"], similar_frac=d["similar_frac"])
+        kb = build_gw(ctx.gs, defects)
+        write_json(kb, out / "kb.json")
+        write_jsonl([x.to_json() for x in defects], out / "defects.jsonl")
+        gw = KBStore(kb, normalized=True)
+        check = self_check(ctx.gs, gw, Executor.from_store(gw), defects)
+        write_json(check, out / "selfcheck.json")
+        print(f"[defects] {rate_tag(rate, seed)}: {len(defects)} defects, self-check failures={check['n_failed']}")
+        if check["n_failed"]:
+            raise SystemExit("self-check failed: see selfcheck.json")
 
 
 def annotate_path(ctx: Context, p: dict) -> dict:
@@ -117,20 +117,27 @@ def annotate_path(ctx: Context, p: dict) -> dict:
 
 
 def stage_paths(ctx: Context) -> None:
+    """Directed sampling: ``n_defective`` paths through corrupted facts and ``n_clean`` paths whose
+    first hop is an unchanged S fact (see kgcoevo.kb.paths.DirectedSampler)."""
     c = ctx.cfg["paths_sampling"]
-    d = ctx.cfg["defects"]
-    for rate in d["rates"]:
-        seeds = d["seeds"] if rate == d["main_rate"] else d["seeds"][:1]
-        n = c["n"] if rate == d["main_rate"] else c["n_sweep"]
-        for seed in seeds:
-            gw, gwx = ctx.gw(rate, seed), ctx.gw_exec(rate, seed)
-            paths = PathSampler(gw, gwx, seed=seed).sample(ctx.region["A"], n, c["type_weights"])
-            rows = [annotate_path(ctx, p.to_json()) for p in paths]
-            write_jsonl(rows, ctx.data / "paths" / f"{rate_tag(rate, seed)}.jsonl")
-            exp = sum(r["exposed"] for r in rows)
-            aff = sum(r["answer_affecting"] for r in rows)
-            print(f"[paths] {rate_tag(rate, seed)}: {len(rows)} paths, exposed={exp}, answer-affecting={aff}")
-            ctx.release_gw()
+    rate = ctx.cfg["defects"]["rate"]
+    s_cids = {r["cid"] for r in ctx.support if r["supported"]}
+    gs_cids = set(ctx.gs.cid_to_fid)
+    for seed in ctx.cfg["defects"]["seeds"]:
+        gw, gwx = ctx.gw(rate, seed), ctx.gw_exec(rate, seed)
+        sampler = DirectedSampler(gw, gwx, ctx.gs_exec, gs_cids, s_cids, seed=seed)
+        paths, stats = sampler.sample(ctx.region["A"], ctx.defects(rate, seed), c["n_defective"], c["n_clean"],
+                                      c["type_weights"], max_per_defect=c.get("max_per_defect", 2))
+        rows = [annotate_path(ctx, p.to_json()) for p in paths]
+        tag = rate_tag(rate, seed)
+        write_jsonl(rows, ctx.data / "paths" / f"{tag}.jsonl")
+        write_json(stats, ctx.data / "paths" / f"{tag}_stats.json")
+        print(f"[paths] {tag}: defective={stats['n_defective']} (from {stats['defects_with_a_path']} of "
+              f"{stats['corrupt_defects_in_scope']} corrupted facts), clean={stats['n_clean']}")
+        if stats["n_defective"] < c["n_defective"]:
+            print(f"[paths] WARNING: only {stats['n_defective']} defective paths (wanted {c['n_defective']}); "
+                  "raise paths_sampling.max_per_defect or the defect rate, or lower n_defective")
+        ctx.release_gw()
 
 
 def stage_probe(ctx: Context) -> None:
