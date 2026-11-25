@@ -196,7 +196,8 @@ async def stage_curator(ctx: Context) -> None:
             ps = interleave(lists, k)
             shown = [p.pid for p in ps]
             evidence = "\n".join(f"[{p.pid}] {p.text}" for p in ps) or "(no passages found)"
-        first = await C.diagnose(llm, question=case["question"], answer_key=case["key"], kg_answer=kg_txt,
+        kg_match = ("yes" if match_any(case["key"], kg_vals) else "no") if kg_vals else "no (the KG returns no answer)"
+        first = await C.diagnose(llm, question=case["question"], answer_key=case["key"], kg_answer=kg_txt, kg_match=kg_match,
                                  trigger=TRIGGER_TEXT["t1" if case["t1"] else "t2"],
                                  trajectory=C.render_trajectory(traj, ctx.gs),
                                  kg_facts=C.live_facts_text(ex, edits, ents, names, focus_keys=program_keys(traj)),

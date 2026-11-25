@@ -7,6 +7,7 @@ can be wrong, and so can the KG. Only the evidence decides which one is right.
 Question: {{question}}
 Answer key (from the task generator; it can be wrong): {{answer_key}}
 The task's own program run on the current KG returns: {{kg_answer}}
+Does the KG's answer match the answer key? {{kg_match}}
 Why it was flagged: {{trigger}}
 
 ## Solver trajectory
@@ -33,9 +34,11 @@ Why it was flagged: {{trigger}}
   * the evidence states a third value -> the KG is at fault; edit it to the value the evidence states,
     not to the answer key;
   * the evidence states neither -> no edit (pick the most likely diagnosis, "edit": null).
-- "bad_key" needs a KG value and an evidence item stating it. If the KG returns no answer, it is not
-  bad_key. A KG answer that differs from the key is not a reason by itself: every wrong or missing KG
-  fact looks like that.
+- "bad_key" needs a KG answer that differs from the key and an evidence item that states the KG's
+  value; give that item's id in "evidence_id". Without such an item, do not choose bad_key (your own
+  memory is not evidence). If the KG returns no answer, or its answer matches the key, it is not bad_key.
+  A KG answer that differs from the key is not a reason by itself: every wrong or missing KG fact looks
+  like that.
 - The answer key is never evidence. Never change the KG just to make the answer key come out.
 - Propose an edit only for missing_fact or wrong_fact, and only if an evidence item explicitly states
   the new fact about this entity.

@@ -154,10 +154,10 @@ def render_trajectory(traj: dict | None, store) -> str:
     return "\n".join(lines)
 
 
-async def diagnose(llm, *, question: str, answer_key: str, kg_answer: str, trigger: str, trajectory: str,
-                   kg_facts: str, evidence: str, seed: int | None = None) -> dict:
-    msgs = messages("curator", question=question, answer_key=answer_key, kg_answer=kg_answer, trigger=trigger,
-                    trajectory=trajectory, kg_facts=kg_facts, evidence=evidence)
+async def diagnose(llm, *, question: str, answer_key: str, kg_answer: str, kg_match: str, trigger: str,
+                   trajectory: str, kg_facts: str, evidence: str, seed: int | None = None) -> dict:
+    msgs = messages("curator", question=question, answer_key=answer_key, kg_answer=kg_answer, kg_match=kg_match,
+                    trigger=trigger, trajectory=trajectory, kg_facts=kg_facts, evidence=evidence)
     raw = await llm.chat(msgs, seed=seed)
     js = extract_json(raw) or {}
     d = str(js.get("diagnosis", "")).strip().lower()
