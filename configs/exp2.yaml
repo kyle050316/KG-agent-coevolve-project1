@@ -16,3 +16,5 @@ exp2:
   challenger_cases:                  # Exp 1 outputs: main run (seed 0) and the seed-1 replication
     sources: [{work_dir: runs/main, seed: 0}, {work_dir: runs/main_s1, seed: 1}]
     n_per_class: 30
+llm:
+  curator: {temperature: 0.0, top_p: 1.0, presence_penalty: 0.0}   # greedy: one deterministic decision per case
