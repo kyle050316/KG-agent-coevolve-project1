@@ -115,3 +115,85 @@ Challenger KG cases repair less: 5/56 flagged runs (gold passage shown in 26), c
 * Retrieval: query with the located subject and key, and always include the subject's own page.
 * Verifier: natural-language claims for relations ("X was born in Y") and entity aliases.
 * Check bad_key citations with the verifier, as for edits.
+
+---
+
+# Curator v2 (2026-11-24, same cases)
+
+Report: [exp2_v2_report.md](exp2_v2_report.md). Config `configs/exp2_v2.yaml`, commit `343d79a`. Same 385
+cases and Solver runs as above; only the Curator, locality and analysis stages were re-run (A100, about
+22 min, 2.5 compute units).
+
+Changes: the task program is shown step by step on the case KG; single-valued keys are marked (the model
+chooses add or update, its output is not rewritten); evidence also comes from the pages of the entities
+the task program reaches, queried with the path keys and both candidate values (k = 10); relation claims
+for the verifier read "The <key> of <subject> is <object>."; 5 sampled runs per case (temperature 0.7).
+The `no_tool` ablation was not re-run. The changes were made together, so their effects are not separated,
+except where a funnel step shows them.
+
+## v1 vs v2 (KQA Pro cases, sample 0, T1+T2)
+
+| | v1 (greedy) | v2 (sample 0) |
+|---|---|---|
+| **end-to-end exact repair (of 200 KG cases)** | 30 (15%) | **66 (33%)** |
+| T1 only | 30 | 62 |
+| program restore | 42 | 76 |
+| gold passage among the shown evidence (of 151 flagged) | 61 | 110 |
+| diagnosed a KG fault / final edit / final edit exact | 114 / 85 / 52 | 137 / 109 / 76 |
+| repaired when the gold passage is shown / not shown | 38% / 8% | 59% / 2% |
+| verifier confirms the cited item / gate rejected an exact repair | 48% / 25% | 75% / 9% |
+| exact repair: missing visible / wrong visible / missing silent | 19/69 / 11/70 / 0/8 | 37/69 / 25/70 / 4/8 |
+| diagnosis accuracy / KG recall / localisation | 72% / 76% / 74% | 79% / 91% / 87% |
+| admitted edits on intact KG (non_kg 100 + bad_key 25) | 0 | 2 (both non_kg) |
+| admitted KQA Pro edits true in G\* | 42/44 | 77/87 |
+| neighbour questions broken (gold programs) | 0/692 | 3/1815 (from the 2 false edits) |
+| admitted edits writing the Challenger's wrong key (of 51) | 1 | 2 |
+| bad_key detected (of 25) / bad_key on other cases (of 307) | 15 / 15 | 11 / 12 |
+| Challenger KG cases repaired: key wrong (26) / control (30) | 3 / 2 | 6 / 5 |
+
+## Sampling (5 runs per case, aggregated offline)
+
+| aggregation | exact repair (of 200) | edits on intact KG (of 125) | KQA Pro edits true in G\* |
+|---|---|---|---|
+| sample 0 | 66 | 2 | 77/87 |
+| majority of 3 / of 5 | 71 / 72 | 2 / 2 | 84/93 / 86/93 |
+| best-of-5 through the gate | 72 | 3 | 87/97 |
+| consensus >= 3 of 5 | 66 | 1 | 78/84 |
+
+Exact repair over the KG runs varies little between samples (40.4-43.7%, sd 1.4).
+
+## What the admitted edits that are not true in G\* are (v2, sample 0, 13 edits)
+
+| kind | cases |
+|---|---|
+| key copied with the arrow of the KG listing (`--spouse--`), so a junk attribute was added (bug) | Heather Locklear, Penelope Wilton |
+| right name, wrong entity of that name (Aberdeen, Birmingham, Tehran) | Annie Lennox, Steve Winwood, Abbas Kiarostami |
+| year written for a date key | Delmer Daves, Michael Schur |
+| wrong key (`member of` for `member of political party`) or wrong value (native name) | Nancy Pelosi, Spike Jonze, Fred Quimby |
+| G\* disagrees with the documents | Handel (native name); the two non_kg edits (Debi Mazar's birthplace, USC student count) |
+
+Both "wrong key" writes are not real key-following: Handel's native name (as above), and Glen A. Larson,
+where the Challenger's question asks for the city but the program returns its area, so writing "Santa
+Monica" restores the G\* fact. Right value but add instead of update: 17 edits (v1: 19), so marking
+single-valued keys barely helped.
+
+## Findings (v2)
+
+1. End-to-end repair more than doubles (15% → 33%; 36% with a majority of 5 samples). Most of the gain
+   follows the evidence: the gold passage is shown in 110/151 flagged cases (v1: 61), and repair given it
+   rises from 38% to 59% (the verifier now confirms 75% of cited items instead of 48%).
+2. Safety stays high but is no longer perfect: 2 false edits on 100 non-KG cases (both where G\* and the
+   documents disagree), 77/87 admitted edits true in G\*; no wrong Challenger key reached the KG in a way
+   that contradicts G\*.
+3. Sampling helps a little: +6 repairs with a majority of 5, at no extra false edit; best-of-5 adds one
+   false edit; 3-of-5 consensus removes one false edit but also the gain.
+4. T2 now adds 4 repairs (silent missing facts 4/8), so H5 holds weakly.
+5. The remaining losses: no gold passage (41 cases, 1 repaired), add instead of update (17), entity
+   disambiguation and key parsing (5 admitted wrong edits), bad_key under-detected (11/25).
+
+## Next fixes (not run)
+
+* Strip the listing arrows from keys (`--spouse-->` → `spouse`) and parenthesised qualifiers from objects.
+* Resolve objects with the hyperlink anchors of the cited passage (gold entity links) instead of the
+  first entity of that name.
+* Ask for the full value of date keys (YYYY-MM-DD).
