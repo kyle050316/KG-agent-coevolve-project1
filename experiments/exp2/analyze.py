@@ -294,6 +294,31 @@ def main() -> None:
               "the gold KQA Pro program returns the gold answer again.",
               _md(["view", "flagged %", "exact repair %", "program restore %"], e2e)]
 
+    # 3b. repair funnel and retrieval (full): where are KG repairs lost?
+    def gold_shown(r):
+        d = cases[r["case_id"]].get("defect") or {}
+        return bool(set(d.get("passage_ids") or []) & set(r.get("shown") or []))
+
+    fun_rows = []
+    for src in ("kqapro", "challenger"):
+        rs = [r for r in full if r["cls"] in KG_CLASSES and cases[r["case_id"]].get("source", "kqapro") == src]
+        if not rs:
+            continue
+        ex = [r for r in rs if exact_repair(r["final_edit"], cases[r["case_id"]].get("defect"))]
+        steps = [("flagged runs", len(rs)), ("gold passage among the shown evidence", sum(gold_shown(r) for r in rs)),
+                 ("diagnosed a KG fault", sum(r["diagnosis"] in KG_CLASSES for r in rs)),
+                 ("final edit", sum(bool(r["final_edit"]) for r in rs)), ("final edit exact", len(ex)),
+                 ("exact and verified", sum(bool(r["verified"]) for r in ex)), ("exact and admitted", sum(r["admitted"] for r in ex))]
+        fun_rows += [[src, k, f"{v}/{len(rs)}"] for k, v in steps]
+        for g in (True, False):
+            x = [r for r in rs if gold_shown(r) == g]
+            fun_rows.append([src, f"repaired when the gold passage is {'shown' if g else 'not shown'}", _w(sum(r["_repaired"] for r in x), len(x))])
+    S["funnel"] = fun_rows
+    parts += ["## Repair funnel and retrieval (full, KG cases)",
+              "Gold passage = a passage that states the defect fact in S. Retrieval is BM25 over the linked entities "
+              "and their neighbours on the case KG (not oracle, unlike Exp 1 C2).",
+              _md(["source", "step", "count"], fun_rows)]
+
     # 4. by subtype (full, T1+T2)
     sub_rows = []
     for (cls, sub), _ in sorted(groups.items()):
