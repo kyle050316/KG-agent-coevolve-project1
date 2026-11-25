@@ -1,13 +1,17 @@
 """Curator: failure attribution and KG repair (Exp 2), prompt-based with a counterfactual tool.
 
 Flow per flagged case:
-1. ``diagnose`` (prompt): missing_fact | wrong_fact | non_kg, the located fact, and a single-fact edit;
+1. ``diagnose`` (prompt): missing_fact | wrong_fact | non_kg | bad_key, the located fact, and a
+   single-fact edit. The model sees both the KG's answer to the task program and the answer key, and is
+   told that the key can be wrong (tasks come from a Challenger whose keys are not always right);
 2. tool (optional, ablation ``no_tool`` skips it): the edit is applied to a sandbox copy of the KG,
-   the Solver's program is re-executed and the Solver re-answers; the result goes back to the model;
+   the Solver's program is re-executed and the Solver re-answers; the result goes back to the model
+   without saying whether it matches the answer key (agreement with the key is not evidence);
 3. ``decide`` (prompt): commit, revise or withdraw. The re-run is information, not a gate, because a
    correct edit does not fix a wrong Solver program;
-4. source gate (as in the proposal): an edit is admitted only if it cites an evidence item that was
-   shown and an independent verifier confirms that the item states the new fact.
+4. source gate (two-sided): an edit is admitted only if it cites an evidence item that was shown, an
+   independent verifier confirms that the item states the new fact, and no shown item states the value
+   that the edit replaces (then the documents support the current KG).
 """
 
 from __future__ import annotations
@@ -20,7 +24,8 @@ from kgcoevo.kb.store import Edit
 from kgcoevo.llm.parsing import extract_json
 from kgcoevo.llm.prompts import messages, render
 
-DIAGNOSES = ("missing_fact", "wrong_fact", "non_kg")
+DIAGNOSES = ("missing_fact", "wrong_fact", "non_kg", "bad_key")  # the first two come with an edit
+EDIT_DIAGNOSES = DIAGNOSES[:2]
 
 
 def vc_to_raw(vc) -> dict:
@@ -139,10 +144,10 @@ def render_trajectory(traj: dict | None, store) -> str:
     return "\n".join(lines)
 
 
-async def diagnose(llm, *, question: str, answer_key: str, trigger: str, trajectory: str, kg_facts: str,
-                   evidence: str, seed: int | None = None) -> dict:
-    msgs = messages("curator", question=question, answer_key=answer_key, trigger=trigger, trajectory=trajectory,
-                    kg_facts=kg_facts, evidence=evidence)
+async def diagnose(llm, *, question: str, answer_key: str, kg_answer: str, trigger: str, trajectory: str,
+                   kg_facts: str, evidence: str, seed: int | None = None) -> dict:
+    msgs = messages("curator", question=question, answer_key=answer_key, kg_answer=kg_answer, trigger=trigger,
+                    trajectory=trajectory, kg_facts=kg_facts, evidence=evidence)
     raw = await llm.chat(msgs, seed=seed)
     js = extract_json(raw) or {}
     d = str(js.get("diagnosis", "")).strip().lower()

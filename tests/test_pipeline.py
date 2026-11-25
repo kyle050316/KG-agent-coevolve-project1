@@ -11,6 +11,8 @@ import re
 import pytest
 import yaml
 
+from kgcoevo.eval.checks import answer_forms
+from kgcoevo.eval.compare import mentions
 from kgcoevo.llm.client import MockLLM
 from kgcoevo.llm.prompts import task_of
 from kgcoevo.runner import read_jsonl
@@ -45,6 +47,9 @@ class Script:
             p = self.paths[desc]
             names = re.search(r"The question must name: (.*)", text).group(1)
             q = f"[{p['path_id']}] Following the path from {names.replace(chr(39), '')}, what is the result?"
+            if "own background knowledge" in text:  # C1know: changes keys to wrong values (bad_key cases)
+                return json.dumps({"decision": "correct", "question": q, "answer": "1900-01-0" + ("2" if p["answer_affecting"] else "1"),
+                                   "suspect_facts": []})
             if "Passages:" in text or "Reference KG facts" in text:
                 if p["answer_affecting"]:
                     if p["gs_answers"]:
@@ -102,13 +107,15 @@ class Script:
                                "located_fact": {"subject": "Barack Obama", "key": "date of birth"}, "edit": edit, "confidence": 0.8})
         if t == "curator_decide":
             first = json.loads(msgs[-2]["content"])
-            if "matches the answer key: yes" in text:
+            if "1961-08-04" in text.split("program returns:")[-1]:
                 return json.dumps({"decision": "commit", "diagnosis": first["diagnosis"], "edit": None})
             if "could not be applied" in text:
                 return json.dumps({"decision": "withdraw", "diagnosis": "non_kg", "edit": None})
             return json.dumps({"decision": "revise", "diagnosis": first["diagnosis"], "edit": first["edit"]})
         if t == "verify_entailment":
-            return json.dumps({"entails": True})
+            passage = text.split('"""')[1]
+            value = re.split(r" is |: ", text.split("Claim: ")[1].split("\n")[0])[-1].rstrip(".")
+            return json.dumps({"entails": any(mentions(passage, f) for f in answer_forms(value))})
         raise AssertionError(f"unexpected task {t}")
 
 
@@ -196,9 +203,16 @@ def test_end_to_end(run_dir, capsys):
     assert "Paired" not in report and "McNemar" not in report  # counts only
 
     build_cases.main(llms, _args(run_dir, ["all"]))
+    pool = read_jsonl(run_dir / "run" / "exp2" / "pool.jsonl")
+    flags = [q["eligible"] for q in pool]
+    assert any(flags) and flags == sorted(flags, reverse=True), "questions that can carry a defect come first"
     cases = read_jsonl(run_dir / "run" / "exp2" / "cases.jsonl")
     assert cases and {c["cls"] for c in cases} & {"missing_fact", "wrong_fact"}
-    assert {c["cls"] for c in cases} <= {"missing_fact", "wrong_fact", "non_kg"}
+    assert {c["cls"] for c in cases} <= {"missing_fact", "wrong_fact", "non_kg", "bad_key"}
+    ch = {(c["cls"], c["subtype"]) for c in cases if c["source"] == "challenger"}
+    assert ("bad_key", "challenger") in ch and ("wrong_fact", "challenger_key_wrong") in ch, ch
+    assert ("wrong_fact", "challenger_key_right") in ch, ch
+    assert all(c["key"] != c["gold_answer"] for c in cases if c["cls"] == "bad_key")
     assert all(c["traj"] for c in cases if c["t1"] or c["t2"])
     kinds = {(c["cls"], c["subtype"]) for c in cases}
     assert ("non_kg", "wrong") in kinds and ("non_kg", "ungrounded") in kinds, kinds
@@ -211,10 +225,12 @@ def test_end_to_end(run_dir, capsys):
     assert any(r["second"] for r in cur if r["ablation"] == "full"), "the tool turn ran"
     assert not any(r["admitted"] for r in cur if r["ablation"] == "no_docs"), "no evidence -> nothing admitted"
     assert any(r["admitted"] for r in cur)
+    assert not any(r["admitted"] and r["kg_supported"] for r in cur)
+    assert not any(r["admitted"] for r in cur if r["cls"] == "bad_key"), "the wrong key never reaches the KG"
     a2.main()
     rep2 = (run_dir / "run" / "results" / "exp2_report.md").read_text()
     for section in ("Cases and trigger coverage", "Diagnosis and repair", "End-to-end", "Counterfactual tool",
-                    "Paired ablations", "Source gate", "Locality", "Baselines"):
+                    "Paired ablations", "Source gate", "Locality", "Baselines", "Cases from Exp 1 Challenger tasks"):
         assert section in rep2, section
 
 

@@ -40,7 +40,9 @@ def question_coverage(store: KBStore, questions: list[dict]) -> Counter:
 
 def select_regions(store: KBStore, page_words: dict[str, int], *, concept: str = "human", n_a: int = 200,
                    n_b: int = 200, min_facts: int = 8, min_page_words: int = 150, seed: int = 0,
-                   questions: list[dict] | None = None, min_questions_b: int = 3) -> dict:
+                   questions: list[dict] | None = None, min_questions_b: int = 3, n_b_extra: int = 0) -> dict:
+    """``n_b_extra`` adds more region-B entities after A and the first ``n_b`` B entities are chosen,
+    so A and the core of B are the same as with ``n_b_extra=0`` (Exp 1 data stay valid)."""
     rng = random.Random(seed)
     pool = []
     for eid in store.entities_with_concept(concept):
@@ -71,8 +73,13 @@ def select_regions(store: KBStore, page_words: dict[str, int], *, concept: str =
     region_b = stratified(b_cands, n_b)
     rest = [q for q in pool if q not in set(region_b)]
     region_a = stratified(rest, n_a)
+    core_b = sorted(region_b)
+    if n_b_extra > 0:
+        taken = set(region_a) | set(region_b)
+        region_b = region_b + stratified([q for q in b_cands if q not in taken], n_b_extra)
     return {
-        "concept": concept, "A": sorted(region_a), "B": sorted(region_b),
+        "concept": concept, "A": sorted(region_a), "B": sorted(region_b), "B_core": core_b,
+        "b_candidates": len(b_cands),
         "stratum": {q: strata[q] for q in region_a + region_b},
         "page_words": {q: page_words.get(q, 0) for q in region_a + region_b},
         "question_coverage": {q: cov[q] for q in region_b},

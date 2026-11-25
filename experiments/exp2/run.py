@@ -6,8 +6,14 @@ Every case flagged by T1 or T2 is given to the Curator once per ablation:
   no_docs  as full, without evidence passages (does the Curator edit from memory?)
 Ablations other than 'full' run on a stratified subset of ``ablation_n`` cases.
 
-Source gate (proposal): an edit is admitted only if it cites an evidence item that was shown and an
-independent verifier confirms that the item states the new fact. Deletions are never admitted.
+The answer key can be wrong (cases from Exp 1 Challenger tasks), so the Curator sees both the KG's answer
+to the task program and the key, evidence is retrieved for both values, and the sandbox result does not
+say whether the new answer matches the key.
+
+Source gate (two-sided): an edit is admitted only if it cites an evidence item that was shown, an
+independent verifier confirms that the item states the new fact, and the shown evidence does not state
+the value that the edit replaces (for an add: an existing value of a functional key). Deletions are never
+admitted.
 
 Usage:  python -m experiments.exp2.run --config configs/main.yaml --stages curator locality
 """
@@ -33,7 +39,7 @@ from kgcoevo.runner import read_jsonl, run_jsonl
 
 STAGES = ["curator", "locality"]
 TRIGGER_TEXT = {
-    "t1": "the Solver's final answer does not match the answer key.",
+    "t1": "the Solver's final answer differs from the answer key (either one can be wrong).",
     "t2": ("the Solver's final answer matches the answer key, but its knowledge-graph execution did not return "
            "it (the Solver answered from memory or text, not from the KG)."),
 }
@@ -84,19 +90,72 @@ def program_keys(traj: dict) -> set[str]:
     return keys
 
 
-def claim_text(ctx: Context, edit: Edit) -> str:
+def claim_text(ctx: Context, edit: Edit, value=None) -> str:
+    """The fact the edit writes (or, with ``value``, the same subject/key with another value)."""
+    v = edit.new_value if value is None else value
     if edit.kind == "rel":
-        return f"{ctx.gs.name(edit.subject)} has {edit.key}: {ctx.gs.name(edit.new_value)}."
-    return f"The {edit.key} of {ctx.gs.name(edit.subject)} is {value_str(edit.new_value)}."
+        return f"{ctx.gs.name(edit.subject)} has {edit.key}: {ctx.gs.name(v) if v in ctx.gs.entities else v}."
+    return f"The {edit.key} of {ctx.gs.name(edit.subject)} is {value_str(v)}."
 
 
 def tool_text(rr: dict | None, err: str = "") -> str:
+    """Sandbox result for the Curator; it does not say whether the answer matches the key (not evidence)."""
     if rr is None:
         return f"The edit could not be applied to the KG: {err}"
     ex = rr["exec"] or {}
     res = ex.get("answers") if ex.get("ok") else f"ERROR {ex.get('error')}"
     return (f"After applying your edit, the Solver's program returns: {json.dumps(res, ensure_ascii=False)}.\n"
-            f"The Solver's new final answer: {rr['answer']!r} (matches the answer key: {'yes' if rr['success'] else 'no'}).")
+            f"The Solver's new final answer: {rr['answer']!r}.")
+
+
+def kg_answer_text(res) -> tuple[list[str], str]:
+    if res.ok and res.answers:
+        return [str(a) for a in res.answers], json.dumps([str(a) for a in res.answers], ensure_ascii=False)
+    return [], "no answer (empty result)" if res.ok else f"no answer (error: {res.error})"
+
+
+def interleave(lists: list[list], k: int) -> list:
+    """Round-robin merge without duplicates (evidence for the key and for the KG value in equal shares)."""
+    out, seen = [], set()
+    for i in range(max((len(x) for x in lists), default=0)):
+        for x in lists:
+            if i < len(x) and x[i].pid not in seen and len(out) < k:
+                seen.add(x[i].pid)
+                out.append(x[i])
+    return out
+
+
+def replaced_values(ex, edits: list[Edit], edit: Edit, functional: dict) -> list:
+    """Values that the edit contradicts: the old value of an update, or the existing values of a
+    functional key for an add (a second value of a multi-valued key contradicts nothing)."""
+    if edit.op == "update":
+        return [edit.value]
+    if edit.op == "add" and functional.get(edit.key):
+        return [c["value"] for c in C.live_entries(ex, edits, edit.subject, edit.key) if c["kind"] == edit.kind]
+    return []
+
+
+async def source_gate(ctx: Context, judge, ex, edits: list[Edit], edit: Edit | None, js_edit: dict | None,
+                      shown: dict[str, str], functional: dict) -> dict:
+    """Two-sided source gate. ``shown``: evidence id -> text of the items the Curator saw.
+    1. the edit cites a shown item and the verifier says that item states the new fact;
+    2. the verifier finds none of the shown items stating the value the edit replaces (if it did, the
+       documents support the current KG, e.g. the task's answer key is the wrong side)."""
+    cited = str((js_edit or {}).get("evidence_id", "") or "")
+    out = {"cited_ok": bool(edit) and cited in shown, "verified": None, "kg_supported": None}
+    if edit is not None and edit.op != "delete" and out["cited_ok"]:
+        out["verified"] = (await verify_entailment(judge, shown[cited], claim_text(ctx, edit)))["entails"]
+        olds = replaced_values(ex, edits, edit, functional) if out["verified"] else []
+        if olds:
+            text = "\n".join(shown.values())
+            out["kg_supported"] = False
+            for v in olds:
+                if (await verify_entailment(judge, text, claim_text(ctx, edit, value=v)))["entails"]:
+                    out["kg_supported"] = True
+                    break
+    out["admitted"] = bool(edit is not None and edit.op != "delete" and out["cited_ok"] and out["verified"]
+                           and not out["kg_supported"])
+    return out
 
 
 async def stage_curator(ctx: Context) -> None:
@@ -106,6 +165,7 @@ async def stage_curator(ctx: Context) -> None:
     solver = make_solver(ctx)
     linker = EntityLinker(ctx.gs)
     names = {e: ctx.gs.name(e) for e in ctx.gs.entities}
+    functional = ctx.gs.functional_keys()
 
     async def sandbox(case: dict, edits: list[Edit], edit: Edit, ex, seed: int) -> dict:
         rr = await solver.rerun(case["question"], case["traj"].get("program"), ex, edits + [edit], seed=seed)
@@ -122,24 +182,30 @@ async def stage_curator(ctx: Context) -> None:
             if tr.ok:
                 ents += [e for e in tr.entities if e not in ents]
         ents = [e for e in ents if e in ctx.gs.entities][:8]
+        kg_vals, kg_txt = kg_answer_text(ex.run(case["program_gold"], edits))  # the task's own program
         shown: list[str] = []
         if abl == "no_docs":
             evidence = "(none)"
         else:
-            nbrs = C.live_neighbors(ex, edits, ents)  # case KG, so a deleted link is not followed
-            ps = ctx.index.search(f"{case['question']} {case['key']}", conf["evidence_k"], qids=sorted(nbrs))
+            nbrs = sorted(C.live_neighbors(ex, edits, ents))  # case KG, so a deleted link is not followed
+            k = conf["evidence_k"]
+            # retrieve for the key and for the KG's answer, so neither side is favoured
+            lists = [ctx.index.search(f"{case['question']} {case['key']}", k, qids=nbrs)]
+            if kg_vals and not match_any(case["key"], kg_vals):
+                lists.append(ctx.index.search(f"{case['question']} {' '.join(kg_vals)}", k, qids=nbrs))
+            ps = interleave(lists, k)
             shown = [p.pid for p in ps]
             evidence = "\n".join(f"[{p.pid}] {p.text}" for p in ps) or "(no passages found)"
-        first = await C.diagnose(llm, question=case["question"], answer_key=case["key"],
+        first = await C.diagnose(llm, question=case["question"], answer_key=case["key"], kg_answer=kg_txt,
                                  trigger=TRIGGER_TEXT["t1" if case["t1"] else "t2"],
                                  trajectory=C.render_trajectory(traj, ctx.gs),
                                  kg_facts=C.live_facts_text(ex, edits, ents, names, focus_keys=program_keys(traj)),
                                  evidence=evidence, seed=seed)
-        rec = {"case_id": case["case_id"], "cls": case["cls"], "subtype": case["subtype"], "t1": case["t1"], "t2": case["t2"],
-               "ablation": abl, "j": j, "shown": shown,
-               "first": {k: first[k] for k in ("diagnosis", "located_fact", "edit", "confidence", "rationale", "parse_ok")},
+        rec = {"case_id": case["case_id"], "cls": case["cls"], "subtype": case["subtype"], "source": case.get("source", "kqapro"),
+               "t1": case["t1"], "t2": case["t2"], "ablation": abl, "j": j, "shown": shown, "kg_answer": kg_vals,
+               "first": {k: first[k] for k in ("diagnosis", "located_fact", "edit", "confidence", "parse_ok")},
                "tool": None, "second": None}
-        proposed = first["diagnosis"] in C.DIAGNOSES[:2] and bool(first["edit"])
+        proposed = first["diagnosis"] in C.EDIT_DIAGNOSES and bool(first["edit"])
         edit, err = (C.build_edit(ex, ctx.gs.name_to_ids, edits, first["edit"], prefer=ents) if proposed
                      else (None, "no edit proposed"))
         rec["proposed"] = proposed
@@ -154,9 +220,9 @@ async def stage_curator(ctx: Context) -> None:
                     err = f"{type(e).__name__}: {e}"
             rec["tool"] = rr if rr else {"error": err}
             second = await C.decide(llm, first, tool_text(rr, err), seed=seed)
-            rec["second"] = {k: second[k] for k in ("decision", "diagnosis", "edit", "rationale", "parse_ok")}
+            rec["second"] = {k: second[k] for k in ("decision", "diagnosis", "edit", "parse_ok")}
             diagnosis = second["diagnosis"]
-            if second["decision"] == "withdraw" or diagnosis not in C.DIAGNOSES[:2]:
+            if second["decision"] == "withdraw" or diagnosis not in C.EDIT_DIAGNOSES:
                 final_js, final_edit = None, None
             elif second["decision"] == "revise" and second["edit"]:
                 final_js = second["edit"]
@@ -164,14 +230,8 @@ async def stage_curator(ctx: Context) -> None:
                 rec["revised_edit_error"] = err
         rec["diagnosis"] = diagnosis
         rec["final_edit"] = final_edit.to_json() if final_edit else None
-        # source gate
-        cited = str((final_js or {}).get("evidence_id", "") or "")
-        rec["cited_ok"] = bool(final_edit) and cited in shown
-        rec["verified"] = None
-        if final_edit is not None and final_edit.op != "delete" and rec["cited_ok"]:
-            p = ctx.index.by_id.get(cited)
-            rec["verified"] = (await verify_entailment(judge, p.text, claim_text(ctx, final_edit)))["entails"] if p else False
-        rec["admitted"] = bool(final_edit is not None and final_edit.op != "delete" and rec["cited_ok"] and rec["verified"])
+        texts = {pid: ctx.index.by_id[pid].text for pid in shown if pid in ctx.index.by_id}
+        rec.update(await source_gate(ctx, judge, ex, edits, final_edit, final_js, texts, functional))
         return rec
 
     await run_jsonl(plan(ctx, cases), work, out(ctx, "curator"),

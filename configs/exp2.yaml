@@ -1,0 +1,18 @@
+# Exp 2 with an enlarged region B (1,000 entities). Region A and the first 200 B entities are the same
+# as in configs/main.yaml, so the Exp 1 data stay valid; the 800 extra B entities are drawn the same
+# way (humans with >= 3 KQA Pro questions, stratified by page length). With B = 200 only ~100 KQA Pro
+# questions can carry a defect (a document-supported, repairable fact on the gold path); with B = 1,000
+# about 530 can. Own work dir, so the passages and S of the Exp 1 run in runs/main stay unchanged.
+#   CFG=configs/exp2.yaml bash scripts/run.sh prepare2    # regions, passages, S (CPU, a few minutes)
+#   CFG=configs/exp2.yaml bash scripts/run.sh pool
+#   CFG=configs/exp2.yaml bash scripts/run.sh exp2
+extends: main.yaml
+paths:
+  work_dir: runs/exp2
+region:
+  n_b_extra: 800
+exp2:
+  pool_size: 1500                    # all questions that can carry a defect, then a random rest (non-KG cases)
+  challenger_cases:                  # Exp 1 outputs: main run (seed 0) and the seed-1 replication
+    sources: [{work_dir: runs/main, seed: 0}, {work_dir: runs/main_s1, seed: 1}]
+    n_per_class: 30

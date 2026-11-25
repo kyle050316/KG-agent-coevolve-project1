@@ -10,11 +10,11 @@ Decide what to do with the edit:
 - "withdraw": make no change to the KG.
 
 Note: a correct KG edit does not always change the Solver's answer, for example when the Solver's
-program itself is wrong. Base the decision on whether the evidence supports the edit; use the test
-only as additional information (e.g. it may reveal a wrong entity, key or value format).
+program itself is wrong, and agreeing with the answer key does not make an edit right (the key can be
+wrong). Base the decision on whether the evidence explicitly states the new fact; use the test only as
+additional information (e.g. it may reveal a wrong entity, key or value format).
 
 Return only a JSON object:
 {"decision": "commit|revise|withdraw",
- "diagnosis": "missing_fact|wrong_fact|non_kg",
- "edit": {"op": "add|update", "subject": "<entity name>", "key": "<key>", "old_value": "<value or empty>", "new_value": "<value or entity name>", "evidence_id": "<id>", "quote": "<short quote>"} or null,
- "rationale": "<one sentence>"}
+ "diagnosis": "missing_fact|wrong_fact|bad_key|non_kg",
+ "edit": {"op": "add|update", "subject": "<entity name>", "key": "<key>", "old_value": "<value or empty>", "new_value": "<value or entity name>", "evidence_id": "<id>", "quote": "<short quote>"} or null}

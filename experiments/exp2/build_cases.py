@@ -10,6 +10,16 @@ can restore are used:
                 subtype "ungrounded": the Solver is stably right but its KG execution does not
                 return the answer (it answered from memory with a wrong program)
 
+Cases from Exp 1 Challenger tasks (``exp2.challenger_cases``; the task's own key, which can be wrong):
+
+  bad_key       clean path (KG right), the Challenger changed the key to a wrong value -> no edit
+  wrong_fact    subtype challenger_key_wrong: defective path, the Challenger changed the key to another
+                wrong value -> repair the fact to the G* value, not to the key
+  wrong_fact    subtype challenger_key_right (control): defective path, the key was fixed to the G*
+                value -> repair (a Curator that never edits must not look good)
+
+The case KG is G* plus the one defect of the path (none for bad_key), as for the KQA Pro cases.
+
 KG cases are kept whether or not the Solver still answers correctly. Each case records two triggers
 (computed from k Solver samples on the case KG):
   T1  answer-based: the final answer is stably wrong (<= stable_lo), as in the original design
@@ -29,10 +39,11 @@ from __future__ import annotations
 import asyncio
 import random
 from collections import Counter, defaultdict
+from pathlib import Path
 
 from experiments.common import parse_args, selected, setup
 from kgcoevo.agents.solver import FewShotPool, Solver
-from kgcoevo.context import Context
+from kgcoevo.context import Context, rate_tag
 from kgcoevo.data.defects import make_defect
 from kgcoevo.eval.compare import answers_equal, match_any
 from kgcoevo.kb.store import Edit
@@ -70,8 +81,17 @@ def grounded(traj: dict, key: str) -> bool:
     return bool(ex.get("ok")) and match_any(key, ex.get("answers", []))
 
 
+def defect_fids(ctx: Context, support: dict, path: list[dict], program: list[dict]) -> list[str]:
+    """Gold-path facts that can carry a KG-case defect: stated by the documents (in S) and repairable."""
+    fids = [ctx.gs.cid_to_fid.get(f["cid"]) for f in path]
+    return [f for f in fids if f and support.get(f, {}).get("supported") and repairable(ctx, f, program)]
+
+
 def candidate_questions(ctx: Context) -> list[dict]:
+    """Traceable questions on region B. Questions that can carry a defect come first, so the pool cap
+    never drops them; the rest of the pool is a random sample (non-KG cases are drawn from all)."""
     B = set(ctx.region["B"])
+    support = {r["fid"]: r for r in ctx.support}
     rows = []
     for split in ("train", "val"):
         for i, q in enumerate(ctx.questions(split)):
@@ -86,15 +106,18 @@ def candidate_questions(ctx: Context) -> list[dict]:
                 continue
             prog = [{"function": s["function"], "inputs": s.get("inputs", [])} for s in prog]
             rows.append({"qid": f"{split}:{i}", "question": q["question"], "answer": q["answer"], "program": prog,
-                         "path": tr.facts, "path_entities": tr.entities, "anchor": anchors[0], **features(prog)})
+                         "path": tr.facts, "path_entities": tr.entities, "anchor": anchors[0],
+                         "eligible": bool(defect_fids(ctx, support, tr.facts, prog)), **features(prog)})
     random.Random(ctx.cfg["seed"]).shuffle(rows)
+    rows.sort(key=lambda q: not q["eligible"])  # stable sort: eligible first, random order within
+    print(f"[pool] candidates {len(rows)}, can carry a defect {sum(q['eligible'] for q in rows)}")
     return rows[: X(ctx)["pool_size"]]
 
 
 async def stage_pool(ctx: Context) -> None:
     pool = candidate_questions(ctx)
     write_jsonl(pool, out(ctx, "pool"))
-    print(f"[pool] {len(pool)} traceable questions on region B")
+    print(f"[pool] {len(pool)} traceable questions on region B ({sum(q['eligible'] for q in pool)} can carry a defect)")
     solver = make_solver(ctx)
     items = [{"q": q, "j": j} for q in pool for j in range(X(ctx)["k"])]
 
@@ -135,8 +158,7 @@ def _kg_candidates(ctx: Context, base: list[dict], rng: random.Random) -> list[d
     for q in base:
         if all(v <= 0 for v in quota.values()):
             break
-        fids = [ctx.gs.cid_to_fid.get(f["cid"]) for f in q["path"]]
-        sup = [f for f in fids if f and support.get(f, {}).get("supported") and repairable(ctx, f, q["program"])]
+        sup = defect_fids(ctx, support, q["path"], q["program"])
         if not sup:
             continue
         for cls in order:
@@ -154,6 +176,71 @@ def _kg_candidates(ctx: Context, base: list[dict], rng: random.Random) -> list[d
     return cands
 
 
+CHALLENGER_KINDS = (("bad_key", "challenger"), ("wrong_fact", "challenger_key_wrong"), ("wrong_fact", "challenger_key_right"))
+
+
+def _exp1_tasks(ctx: Context, src: dict) -> list[tuple[dict, dict, dict]]:
+    """(task, path, defects by id) for the valid Mode A tasks of one Exp 1 run (work dir + defect seed)."""
+    wd, seed = Path(src.get("work_dir") or ctx.work), int(src.get("seed", 0))
+    tag = rate_tag(ctx.cfg["defects"]["rate"], seed)
+    files = (wd / "exp1" / "tasks.jsonl", wd / "data" / "paths" / f"{tag}.jsonl", wd / "data" / "gw" / tag / "defects.jsonl")
+    if not all(f.exists() for f in files):
+        print(f"[cases] skipping Challenger source {wd} seed {seed}: missing {[str(f) for f in files if not f.exists()]}")
+        return []
+    tasks, paths, defects = (read_jsonl(f) for f in files)
+    paths = {p["path_id"]: p for p in paths}
+    defects = {d["defect_id"]: d for d in defects}
+    return [(t, paths[t["path_id"]], defects) for t in tasks
+            if t.get("valid") and t.get("source") == "mode_a" and t.get("seed", seed) == seed and t["path_id"] in paths]
+
+
+def challenger_candidates(ctx: Context, rng: random.Random) -> list[dict]:
+    """Cases from valid Exp 1 Mode A tasks, one per path, up to ``n_per_class`` per kind (see module doc)."""
+    conf = X(ctx).get("challenger_cases") or {}
+    n = int(conf.get("n_per_class") or 0)
+    if n <= 0:
+        return []
+    tasks = [x for src in conf.get("sources") or [{}] for x in _exp1_tasks(ctx, src)]
+    in_s = {r["cid"] for r in ctx.support if r.get("supported")}
+    rng.shuffle(tasks)
+    picked: dict[tuple, dict] = {k: {} for k in CHALLENGER_KINDS}
+    for t, p, defects in tasks:
+        gs = t.get("gs_answers") or []
+        if len(gs) != 1:
+            continue
+        key, gw = t["answer"], t.get("gw_answers") or []
+        key_ok = match_any(key, gs)
+        if p["group"] == "clean":
+            if key_ok or match_any(key, gw):
+                continue  # the key was not changed
+            if not all(c in in_s for c in p.get("fact_cids", [])):
+                continue  # every path fact is stated by the documents, so the evidence can back the KG side
+                # (otherwise G* itself may be the odd one out, e.g. an outdated official website)
+            kind, edits, d = CHALLENGER_KINDS[0], [], None
+        else:
+            ds = [defects[i] for i in p.get("defect_ids", []) if i in defects]
+            if len(ds) != 1 or (not key_ok and match_any(key, gw)):
+                continue  # one defect per case; a key equal to the Gw value is never flagged (Solver agrees)
+            d = ds[0]
+            kind, edits = CHALLENGER_KINDS[2 if key_ok else 1], [d["edit"]]
+        bucket, pkey = picked[kind], (t.get("seed"), t["path_id"])
+        if pkey in bucket or len(bucket) >= n:
+            continue
+        # the case KG (G* + this one defect) must reproduce the Gw answer of the path
+        res = ctx.gs_exec.run(t["program"], [Edit.from_json(e) for e in edits])
+        tr = trace(ctx.gs_exec, t["program"])
+        if not (res.ok and res.answers and match_any(res.answers[0], gw or gs)) or not tr.ok:
+            continue
+        prog = [{"function": s["function"], "inputs": s.get("inputs", [])} for s in t["program"]]
+        q = {"qid": t["task_id"], "question": t["question"], "answer": gs[0], "key": key, "program": prog,
+             "path": tr.facts, "path_entities": tr.entities, "anchor": p.get("anchor"), **features(prog)}
+        bucket[pkey] = {"case_id": f"{kind[1]}|{t['task_id']}", "cls": kind[0], "subtype": kind[1], "source": "challenger",
+                                "key_ok": key_ok, "q": q, "defect": d, "edits": edits}
+    out = [c for b in picked.values() for c in b.values()]
+    print("[cases] Challenger cases:", {f"{k[0]}/{k[1]}": len(v) for k, v in picked.items()})
+    return out
+
+
 def case_executor(ctx: Context, case: dict):
     return ctx.gs_exec, [Edit.from_json(e) for e in case["edits"]]
 
@@ -168,15 +255,18 @@ def _pick_traj(samples: list[dict], t1: bool) -> dict | None:
 
 
 def _case(c: dict, samples: list[dict], conf: dict, subtype: str | None = None) -> dict:
+    """``solver_acc``/``t1`` are measured against the task key (which is wrong for some Challenger cases)."""
     q = c["q"]
     acc = sum(s["correct"] for s in samples) / len(samples)
     gr = sum(s["grounded"] for s in samples) / len(samples)
     t1, t2 = acc <= conf["stable_lo"], gr <= conf["stable_lo"]
+    subtype = subtype or c.get("subtype")
     if subtype is None:
         subtype = "visible" if acc <= conf["stable_lo"] else "silent" if acc >= conf["stable_hi"] else "mixed"
-    return {"case_id": c["case_id"], "cls": c["cls"], "subtype": subtype, "t1": t1, "t2": t2,
-            "solver_acc": acc, "solver_grounded": gr, "question": q["question"], "gold_answer": q["answer"],
-            "key": q["answer"], "program_gold": q["program"], "gold_path": q["path"], "path_entities": q["path_entities"],
+    return {"case_id": c["case_id"], "cls": c["cls"], "subtype": subtype, "source": c.get("source", "kqapro"),
+            "t1": t1, "t2": t2, "solver_acc": acc, "solver_grounded": gr, "question": q["question"],
+            "gold_answer": q["answer"], "key": q.get("key", q["answer"]), "key_ok": c.get("key_ok", True),
+            "program_gold": q["program"], "gold_path": q["path"], "path_entities": q["path_entities"],
             "edits": c.get("edits", []), "defect": c.get("defect"), "traj": _pick_traj(samples, t1) if (t1 or t2) else None,
             "features": {"program_len": q["program_len"], "hops": q["hops"], "funcs": q["funcs"]}}
 
@@ -209,7 +299,7 @@ async def stage_cases(ctx: Context) -> None:
     for lst in (base, wrong, ungrounded):
         rng.shuffle(lst)
 
-    cands = _kg_candidates(ctx, base, rng)
+    cands = _kg_candidates(ctx, base, rng) + challenger_candidates(ctx, random.Random(ctx.cfg["seed"] + 1))
     solver = make_solver(ctx)
     k = conf["k"]
     items = [{"c": c, "j": j} for c in cands for j in range(k)]
@@ -218,7 +308,7 @@ async def stage_cases(ctx: Context) -> None:
         c = it["c"]
         ex, edits = case_executor(ctx, c)
         res = await solver.solve(c["q"]["question"], ex, edits, seed=ctx.cfg["seed"] + 7 + 104729 * it["j"])
-        key = c["q"]["answer"]
+        key = c["q"].get("key", c["q"]["answer"])  # the task key (wrong for some Challenger cases)
         return {"case_id": c["case_id"], "j": it["j"], "correct": match_any(res["answer"], [key]),
                 "grounded": grounded(res, key), "traj": res}
 
@@ -232,7 +322,7 @@ async def stage_cases(ctx: Context) -> None:
 
     # non-KG: half "ungrounded" (T2 false alarms on an intact KG), the rest "wrong", matched to KG cases
     n_nk = conf["targets"]["non_kg"]
-    feats = [(c["features"]["funcs"], c["features"]["hops"]) for c in cases]
+    feats = [(c["features"]["funcs"], c["features"]["hops"]) for c in cases if c["source"] == "kqapro"]
     runs_by_q = defaultdict(list)
     for r in pool_runs:
         runs_by_q[r["qid"]].append(r)

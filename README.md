@@ -8,7 +8,8 @@ the scoring KG, Wikipedia (KILT snapshot) plays the role of the literature, and 
 * **Exp 1 (Challenger).** When the KG has defects, how many KG-generated tasks have wrong answer
   keys? Can documents help the Challenger find the defects?
 * **Exp 2 (Curator).** When a Solver task is flagged, can the Curator find the KG defect behind it
-  (missing or wrong fact, or no KG fault) and repair the KG from documents without damaging it?
+  (missing or wrong fact, no KG fault, or a wrong answer key) and repair the KG from documents without
+  damaging it, also when the task's answer key is wrong?
 
 Every answer key, check and score is computed by executing KoPL programs with the **official KoPL
 engine** on the hidden reference KB G\* and the defective working KB Gw. LLM judgments are used only
@@ -31,7 +32,7 @@ sheets for those are exported but optional.
 |---|---|---|
 | Reference KB G\* | Official KQA Pro `kb.json` (16,960 entities), loaded by the official KoPL engine | Exact, executable ground truth |
 | Documents D | KILT Wikipedia snapshot (2019-08-01), cut into ≤100-word passages that keep hyperlink anchors → Wikidata QIDs | Closer in time to the KB than today's Wikipedia; anchors give gold entity links |
-| Regions | 400 "human" entities, stratified by page length (head/torso/tail). **A** (200) for Exp 1; **B** (200, entities that KQA Pro questions are about) for Exp 2 | Popularity strongly affects memorisation (PopQA); disjoint regions keep Exp 2/3 held-out |
+| Regions | "Human" entities, stratified by page length (head/torso/tail). **A** (200) for Exp 1; **B** (entities with ≥ 3 KQA Pro questions) for Exp 2: 200 in `configs/main.yaml`, 1,000 in `configs/exp2.yaml` (the first 200 and A unchanged) | Popularity strongly affects memorisation (PopQA); disjoint regions keep Exp 2/3 held-out |
 | S (document-supported facts) | T-REx-style alignment: exact dates, numbers and strings; years and relations only together with a relation cue word; optional human audit of 50 facts | Every injected defect is discoverable from text in principle |
 | Defects → Gw | A copy of G\* with 30% of the S facts of region A deleted or corrupted (1:1); corruptions are *similar* (type-consistent) or *random* (50/50); both copies of a relation (forward and backward) edited together; self-check on the engine. The defect log (`defects.jsonl`) records each edit and is the ground truth | KG error-detection protocol (CKRL/CAGED); CCA shows similar noise is the hard case |
 | Paths | Directed sampling on Gw, compiled to KoPL by a deterministic compiler: 100 *defective* paths (use a corrupted fact; the G\* answer differs from the Gw answer) and 100 *clean* paths (no fact changed, first hop in S, same answer on Gw and G\*), with the same path-type mix; 1-hop and 2-hop, attributes, relations and qualifiers | Fixed counts in both groups; LLM program-writing errors cannot be mistaken for KG-induced errors |
@@ -117,9 +118,22 @@ output. Each KG case has one sandboxed defect on a fact of the gold path (IKGQA 
 | missing_fact | a document-supported attr/rel fact on the gold path is deleted | re-add the fact from text |
 | wrong_fact | such a fact is corrupted with a type-consistent value | update the value back |
 | non_kg | intact KG. *wrong*: Solver stably wrong on G\*; *ungrounded*: Solver stably right, but its KG execution does not return the answer | no edit |
+| bad_key (from Exp 1) | Challenger task on a clean path (KG right) whose key the Challenger changed to a wrong value | diagnose bad_key, no edit |
+| wrong_fact, *challenger_key_wrong* (from Exp 1) | Challenger task on a defective path whose key was changed to another wrong value | repair to the G\* value, **not** to the key |
+| wrong_fact, *challenger_key_right* (from Exp 1, control) | Challenger task on a defective path whose key was fixed to the G\* value | repair |
+
+The last three come from valid Exp 1 Mode A tasks (main run and seed-1 replication; up to 30 per kind, one per path;
+`exp2.challenger_cases`). Their case KG is G\* plus the path's one defect, and the Solver is scored
+against the task's own key, as it would be in the loop. In Exp 1 only 23-28% of the keys the Challenger
+changed without documents and 57-64% with documents (C2) were right, so the Curator must not trust the
+key. The control keeps a Curator that never edits from looking good. bad_key cases need every path
+fact in S, so the documents can back the KG side (otherwise G\* itself is sometimes the odd one out).
 
 * **Pool.** KQA Pro train/val questions anchored on region B whose official program is traceable on G\*
-  and returns the gold answer. Base questions for KG cases are stably correct **and grounded** on G\*
+  and returns the gold answer. Questions that can carry a defect (a fact on the gold path that is in S and
+  that a single edit can restore) go first, the rest of the pool is random. With B = 200 only 102 of 632
+  traceable questions can carry a defect, too few for 200 KG cases; `configs/exp2.yaml` uses B = 1,000
+  (531 of 3,524) in its own work dir. Base questions for KG cases are stably correct **and grounded** on G\*
   (k=4 Solver samples; stable = ≥3/4, stably wrong = ≤1/4). Only facts a single-fact edit can restore are
   used (no qualifier facts, no qualifiers that the gold program reads).
 * **KG cases are kept whether or not the Solver still answers correctly.** *Visible*: stably wrong;
@@ -130,21 +144,30 @@ output. Each KG case has one sandboxed defect on a fact of the gold path (IKGQA 
     silent defects; on an intact KG it also flags *ungrounded* non-KG cases (the cost of T2).
 * **Curator** (prompt-based, same 9B model). The counterfactual re-run is a **tool**, not a gate, because a
   correct edit does not fix a wrong Solver program:
-  1. Turn 1: question, answer key, why the task was flagged, Solver trajectory, current KG facts around the
-     path, and BM25 passages from the linked entities and their neighbours on the case KG. Output: diagnosis
-     (missing_fact / wrong_fact / non_kg), located fact, and one add/update edit citing an evidence id.
+  1. Turn 1: question, answer key (marked as possibly wrong), **the KG's answer to the task's own program**,
+     why the task was flagged, Solver trajectory, current KG facts around the path, and BM25 passages from
+     the linked entities and their neighbours on the case KG, retrieved in equal shares for the key and for
+     the KG's answer. Output: diagnosis (missing_fact / wrong_fact / non_kg / bad_key), located fact, and one
+     add/update edit citing an evidence id. Rule: evidence states the key's value → KG at fault; the KG's
+     value → bad_key, no edit; a third value → edit to that value, not to the key; neither → no edit. The
+     answer key is never evidence.
   2. Tool: the edit is applied to a sandbox copy, the Solver's program is re-executed and the Solver
-     re-answers; the result goes back to the model as text.
+     re-answers; the result goes back to the model as text, **without saying whether it matches the key**.
   3. Turn 2: commit, revise or withdraw.
-  4. Source gate (proposal): the edit is admitted only if it cites a passage that was shown and an
-     independent verifier says the passage states the new fact. Deletions are never admitted.
+  4. Source gate (two-sided): the edit is admitted only if it cites a passage that was shown, an
+     independent verifier says the passage states the new fact, **and the verifier finds no shown passage
+     stating the value the edit replaces** (for an add: an existing value of a single-valued key).
+     Deletions are never admitted.
 * **Ablations** (paired, on a stratified subset): `no_tool` (turn 1 is final); `no_docs` (extended).
 * **Metrics** (all edit scoring is exact, against the defect log and G\*):
   * **Primary:** admitted exact repair, separately for missing and wrong facts and for visible and silent cases.
   * **False edits** on non_kg cases (the KG was intact) and **edit precision**: admitted edits that are true in G\*.
   * **End-to-end repair** over all KG cases (trigger recall × Curator), for the T1 and T1+T2 views;
     program restore (the gold program returns the gold answer again).
-  * Diagnosis: 3-way accuracy and macro-F1 (bootstrap), KG vs non-KG precision/recall, confusion matrix;
+  * **Challenger cases:** admitted edits that write the task's wrong key into the KG (bad_key and
+    challenger_key_wrong), bad_key detection, exact repair on challenger_key_wrong and on the control,
+    edits blocked by the second side of the gate. The main tables use the KQA Pro cases only.
+  * Diagnosis: accuracy and macro-F1 (bootstrap), KG vs non-KG precision/recall, confusion matrix;
     localisation (step-level, as in Who&When).
   * Tool effects: decisions, how often an exact edit fixes the Solver (why the tool cannot be a gate),
     exact edits withdrawn, wrong edits withdrawn or corrected; full vs no_tool with exact McNemar.
@@ -154,7 +177,8 @@ output. Each KG case has one sandboxed defect on a fact of the gold path (IKGQA 
     majority class, and a surface-feature logistic regression as a shortcut check (AUC near 0.5 is good).
 * **Hypotheses:** H5: T1+T2 repairs more KG cases end-to-end than T1 alone, mostly silent ones, with a
   bounded false-edit rate on ungrounded non-KG cases. H6: the tool lowers false edits without withdrawing
-  correct ones (full vs no_tool, paired).
+  correct ones (full vs no_tool, paired). H7: wrong Challenger keys rarely reach the KG (few admitted edits
+  write a wrong key), while the control is still repaired.
 
 ### 1.4 Statistics and reporting
 
@@ -200,9 +224,15 @@ bash scripts/run.sh prepare $SET $W                    # CPU part (KILT streamin
 bash scripts/run.sh exp1 $SET $W &                     # Exp 1
 bash scripts/run.sh pool $SET $W; wait                 # Exp 2 pool runs in parallel on the same server
 bash scripts/run.sh exp2 $SET $W                       # cases, Curator, locality, report
+
+# 3) Exp 2 with the enlarged region B (own work dir; Exp 1 data untouched)
+W2="paths.work_dir=$D/exp2"
+CFG=configs/exp2.yaml bash scripts/run.sh prepare2 $SET $W2   # regions, passages, S (CPU)
+CFG=configs/exp2.yaml bash scripts/run.sh pool $SET $W2
+CFG=configs/exp2.yaml bash scripts/run.sh exp2 $SET $W2
 ```
 
-`scripts/run.sh` steps: `prepare | exp1 | pool | exp2 | all`; the config comes from `CFG` (default
+`scripts/run.sh` steps: `prepare | prepare2 | exp1 | pool | exp2 | all`; the config comes from `CFG` (default
 `configs/main.yaml`) and any `key=value` after the step overrides it. Each stage can also be run on its own:
 
 ```bash
@@ -271,7 +301,7 @@ caching on one A100 80GB, and per-call token counts guessed before the pilot. Re
 |---|---|---|
 | Exp 1 Mode A (C1/C1know/C2/C3 × 200 paths), Mode B (100 entities × 4), gap tasks, judge (all tasks) | ~3k | ~0.5–1 |
 | Exp 1 Solver evaluation (9 groups × 40 tasks × 8 samples × Gw / G\* / closed-book) | ~8.6k solves | ~2–5 |
-| Exp 2 pool (1,000 questions × 4 Solver samples) | ~4k solves | ~1–3 |
+| Exp 2 pool (1,500 questions × 4 Solver samples, `configs/exp2.yaml`) | ~6k solves | ~1–3 |
 | Exp 2 KG cases (200 × 4 Solver samples) | ~800 solves | ~0.3–0.6 |
 | Exp 2 Curator (2 turns + sandbox answer + verifier; no_tool on 100 cases) | ~1.5k | ~0.5–1 |
 | Exp 2 Solver-level locality (20 edits × 30 questions × 2) | ~1.2k solves | ~0.5–0.9 |

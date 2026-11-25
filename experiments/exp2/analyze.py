@@ -3,7 +3,9 @@
 The goal of Exp 2 is that the Curator finds KG defects and repairs them; the diagnosis label is an
 intermediate output. Primary metric: admitted exact repair (the admitted edit restores the G* fact
 that the defect removed or changed). Secondary: false edits on non-KG cases (the KG was intact) and
-edit precision against G*.
+edit precision against G*. The main tables use the KQA Pro cases (trusted keys); cases from Exp 1
+Challenger tasks (keys that can be wrong) have their own section: edits that write a wrong key into
+the KG, bad_key detection, and the control whose key is right.
 
 Views (which flagged cases reach the Curator)
   T1      answer-based trigger only (the original design)
@@ -23,7 +25,7 @@ from sklearn.metrics import f1_score, roc_auc_score
 from sklearn.model_selection import StratifiedKFold, cross_val_predict
 
 from experiments.common import parse_args, setup
-from experiments.exp2.build_cases import KG_CLASSES, case_executor
+from experiments.exp2.build_cases import CHALLENGER_KINDS, KG_CLASSES, case_executor
 from kgcoevo.agents.curator import DIAGNOSES
 from kgcoevo.context import Context
 from kgcoevo.eval.compare import answers_equal, match_any
@@ -34,6 +36,7 @@ from kgcoevo.kb.trace import trace
 from kgcoevo.kb.values import value_str
 from kgcoevo.runner import read_jsonl, write_json
 
+NON_KG = ("non_kg", "bad_key")
 VIEWS = {"T1": lambda c: c["t1"], "T1+T2": lambda c: c["t1"] or c["t2"]}
 
 
@@ -46,10 +49,12 @@ def _w(k, n):
     return f"{fmt_ci(*wilson(k, n))} (n={n})" if n else "n/a"
 
 
-def _boot_f1(y, p, labels=DIAGNOSES, n_boot=2000, seed=0):
-    y, p = np.asarray(y), np.asarray(p)
+def _boot_f1(y, p, labels=None, n_boot=2000, seed=0):
+    """Macro-F1 over the gold classes present (a class absent from the gold labels would count as 0)."""
     if len(y) == 0:
         return "n/a"
+    labels = labels or [d for d in DIAGNOSES if d in set(y)]
+    y, p = np.asarray(y), np.asarray(p)
     rng = np.random.default_rng(seed)
     base = f1_score(y, p, labels=list(labels), average="macro", zero_division=0)
     bs = [f1_score(y[i], p[i], labels=list(labels), average="macro", zero_division=0)
@@ -80,6 +85,14 @@ def exact_repair(e: dict | None, d: dict | None) -> bool:
     if d["op"] == "delete":
         return e["op"] == "add"
     return e["op"] == "update" and _same_value(e["kind"], e["value"], d["after"])
+
+
+def writes_key(ctx: Context, e: dict | None, key: str) -> bool:
+    """The edit writes the task's answer key into the KG (harmful when the key is wrong)."""
+    if not e or e["op"] == "delete":
+        return False
+    v = e["new_value"]
+    return answers_equal(ctx.gs.name(v) if e["kind"] == "rel" and v in ctx.gs.entities else value_str(v), key)
 
 
 def consistent_with_gstar(ctx: Context, e: dict | None) -> bool:
@@ -223,6 +236,8 @@ def main() -> None:
         d = cases[r["case_id"]].get("defect")
         r["_exact_first"] = exact_repair(r["first_edit_built"], d)
         r["_repaired"] = bool(r["admitted"]) and exact_repair(r["final_edit"], d)
+        r["_writes_key"] = bool(r["admitted"]) and writes_key(ctx, r["final_edit"], cases[r["case_id"]]["key"])
+    kq = {cid for cid, c in cases.items() if c.get("source", "kqapro") == "kqapro"}  # trusted keys
     S: dict = {}
     parts = ["# Exp 2 report"]
 
@@ -242,38 +257,40 @@ def main() -> None:
               "visible/silent: Solver stably wrong/right despite the defect.",
               _md(["class", "subtype", "n", "T1 %", "T2 %", "T1 or T2 %", "Solver acc", "Solver grounded"], rows)]
 
-    n_kg = sum(c["cls"] in KG_CLASSES for c in cases.values())
+    n_kg = sum(c["cls"] in KG_CLASSES for cid, c in cases.items() if cid in kq)
     j0 = [r for r in runs if r["j"] == 0]
     by_abl = defaultdict(list)
     for r in j0:
         by_abl[r["ablation"]].append(r)
 
     # 2. main table: ablation x view
-    head = ["ablation", "view", "runs", "3-way acc %", "macro-F1 %", "KG precision %", "KG recall %", "localisation %",
+    head = ["ablation", "view", "runs", "diagnosis acc %", "macro-F1 %", "KG precision %", "KG recall %", "localisation %",
             "proposed edit exact %", "admitted exact repair, missing %", "admitted exact repair, wrong %",
             "false edits on non_kg %", "admitted edits true in G* %"]
     main_rows = []
     for abl in conf["ablations"]:
         for vname, vf in VIEWS.items():
-            rs = [r for r in by_abl.get(abl, []) if vf(cases[r["case_id"]])]
+            rs = [r for r in by_abl.get(abl, []) if r["case_id"] in kq and vf(cases[r["case_id"]])]
             main_rows.append([abl, vname] + metric_row(ctx, resolver, cases, rs))
     S["main"] = main_rows
-    parts += ["## Diagnosis and repair (seed 0)",
+    parts += ["## Diagnosis and repair (KQA Pro cases, seed 0)",
+              "KQA Pro cases only (answer keys are right; Challenger cases have their own section). "
               "Ablations other than full run on a stratified subset, so compare them with the paired table below. "
               "Repair counts only admitted edits (source gate passed) that restore the G* fact exactly.",
               _md(head, main_rows)]
 
     # 3. end-to-end over all KG cases (full)
     full = by_abl.get("full", [])
+    full_kq = [r for r in full if r["case_id"] in kq]
     e2e = []
     for vname, vf in VIEWS.items():
-        rs = [r for r in full if vf(cases[r["case_id"]]) and r["cls"] in KG_CLASSES]
+        rs = [r for r in full_kq if vf(cases[r["case_id"]]) and r["cls"] in KG_CLASSES]
         rest = [r for r in rs if r["_repaired"]]
         e2e.append([vname, _w(len(rs), n_kg), _w(len(rest), n_kg),
                     _w(sum(restores(ctx, cases[r["case_id"]], r["final_edit"]) for r in rs if r["admitted"]), n_kg)])
     S["end_to_end"] = e2e
-    parts += ["## End-to-end repair over all KG cases (full)",
-              "Denominator: every KG case, including those no trigger flags. Program restore: with the admitted edit, "
+    parts += ["## End-to-end repair over all KG cases (KQA Pro, full)",
+              "Denominator: every KQA Pro KG case, including those no trigger flags. Program restore: with the admitted edit, "
               "the gold KQA Pro program returns the gold answer again.",
               _md(["view", "flagged %", "exact repair %", "program restore %"], e2e)]
 
@@ -291,7 +308,7 @@ def main() -> None:
     prop = [r for r in full if r["proposed"]]
     dec = Counter((r["second"] or {}).get("decision", "none") for r in prop)
     ex_first = [r for r in prop if r["_exact_first"]]
-    bad_first = [r for r in prop if r["cls"] in KG_CLASSES and not r["_exact_first"]] + [r for r in prop if r["cls"] == "non_kg"]
+    bad_first = [r for r in prop if r["cls"] in KG_CLASSES and not r["_exact_first"]] + [r for r in prop if r["cls"] in NON_KG]
     tool_ok = [r for r in ex_first if isinstance(r.get("tool"), dict) and "success" in r["tool"]]
     tool_rows = [["first-turn edits proposed", len(prop)],
                  ["decisions (commit / revise / withdraw / invalid)",
@@ -309,9 +326,9 @@ def main() -> None:
             continue
         pairs = [(sub_full[r["case_id"]], r) for r in by_abl.get(abl, []) if r["case_id"] in sub_full]
         kg_p = [(a, b) for a, b in pairs if a["cls"] in KG_CLASSES]
-        nk_p = [(a, b) for a, b in pairs if a["cls"] == "non_kg"]
+        nk_p = [(a, b) for a, b in pairs if a["cls"] in NON_KG]
         for name, ps, f in (("exact repair (KG cases)", kg_p, lambda r: int(r["_repaired"])),
-                            ("false edit (non_kg cases)", nk_p, lambda r: int(r["admitted"]))):
+                            ("false edit (non_kg / bad_key cases)", nk_p, lambda r: int(r["admitted"]))):
             if ps:
                 m = mcnemar_exact([f(a) for a, _ in ps], [f(b) for _, b in ps])
                 paired.append([f"full vs {abl}", name, len(ps), f"{100 * np.mean([f(a) for a, _ in ps]):.1f}",
@@ -329,6 +346,8 @@ def main() -> None:
     cited = [r for r in fin if r["cited_ok"]]
     gate_rows = [["final edits", len(fin)], ["cite a shown evidence item %", _w(len(cited), len(fin))],
                  ["verifier confirms the cited item %", _w(sum(bool(r["verified"]) for r in cited), len(cited))],
+                 ["blocked: the shown evidence states the value the edit replaces %",
+                  _w(sum(bool(r.get("kg_supported")) for r in cited if r["verified"]), sum(bool(r["verified"]) for r in cited))],
                  ["admitted %", _w(sum(r["admitted"] for r in fin), len(fin))],
                  ["gate rejected an exact repair %", _w(sum(exact_repair(r["final_edit"], cases[r["case_id"]].get("defect"))
                                                             and not r["admitted"] for r in fin), len(fin))]]
@@ -341,10 +360,33 @@ def main() -> None:
     parts += ["## Confusion matrix (full, all flagged cases)",
               _md(["gold \\ predicted"] + labels, [[g] + [cm[(g, p)] for p in labels] for g in DIAGNOSES])]
 
+    # 7b. cases from Exp 1 Challenger tasks: the answer key can be wrong
+    ch_rows = []
+    for cls, sub in CHALLENGER_KINDS:
+        cs = [c for c in cases.values() if c.get("source") == "challenger" and (c["cls"], c["subtype"]) == (cls, sub)]
+        rs = [r for r in full if (r["cls"], r["subtype"]) == (cls, sub)]
+        ch_rows.append([cls, sub, len(cs), _w(sum(c["t1"] or c["t2"] for c in cs), len(cs)), len(rs),
+                        _w(sum(r["diagnosis"] == cls for r in rs), len(rs)),
+                        _w(sum(r["diagnosis"] == "bad_key" for r in rs), len(rs)),
+                        _w(sum(r["admitted"] for r in rs), len(rs)),
+                        _w(sum(r["_repaired"] for r in rs), len(rs)) if cls in KG_CLASSES else "-",
+                        _w(sum(r["_writes_key"] for r in rs), len(rs)) if sub != "challenger_key_right" else "-",
+                        _w(sum(bool(r.get("kg_supported")) for r in rs), len(rs))])
+    S["challenger"] = ch_rows
+    parts += ["## Cases from Exp 1 Challenger tasks (full)",
+              "bad_key: the KG is right and the Challenger changed the key to a wrong value (correct: bad_key, no edit). "
+              "challenger_key_wrong: the path has a defect and the key is another wrong value (correct: repair to the "
+              "G* value, not to the key). challenger_key_right: control, the key was fixed to the G* value (correct: "
+              "repair). 'writes the wrong key' = an admitted edit puts the task's wrong key into the KG; 'blocked' = the "
+              "two-sided gate found the replaced value stated in the shown evidence.",
+              _md(["class", "subtype", "cases", "flagged %", "runs", "diagnosis correct %", "diagnosed bad_key %",
+                   "admitted edit %", "exact repair %", "admitted edit writes the wrong key %", "blocked by the gate %"],
+                  ch_rows)]
+
     if conf["samples"] > 1:
         per_j = defaultdict(list)
         for r in runs:
-            if r["ablation"] == "full" and r["cls"] in KG_CLASSES:
+            if r["ablation"] == "full" and r["cls"] in KG_CLASSES and r["case_id"] in kq:
                 per_j[r["j"]].append(r["_repaired"])
         vals = [100 * np.mean(v) for _, v in sorted(per_j.items())]
         parts.append(f"Seed spread of exact repair over KG runs (full): {', '.join(f'{v:.1f}' for v in vals)} "
@@ -367,13 +409,13 @@ def main() -> None:
         parts.append(f"Solver-level regressions: {_w(sum(not v.get('after', False) for v in before_ok), len(before_ok))}.")
 
     # 9. baselines on the flagged cases
-    flagged = [c for c in cases.values() if (c["t1"] or c["t2"]) and c.get("traj")]
+    flagged = [c for cid, c in cases.items() if cid in kq and (c["t1"] or c["t2"]) and c.get("traj")]
     y = [c["cls"] for c in flagged]
     sb = surface_baseline(flagged)
     S["baselines"] = {"exec_rule_macro_f1": _boot_f1(y, [exec_rule(c) for c in flagged]),
                       "majority_macro_f1": _boot_f1(y, [Counter(y).most_common(1)[0][0]] * len(y)) if y else "n/a",
                       "surface_auc": sb}
-    parts += ["## Baselines (all flagged cases)",
+    parts += ["## Baselines (flagged KQA Pro cases)",
               _md(["baseline", "result"],
                   [["execution rule (error/empty -> missing, other answer -> wrong, key returned -> non_kg), macro-F1 %",
                     S["baselines"]["exec_rule_macro_f1"]],
@@ -382,12 +424,14 @@ def main() -> None:
 
     with open(ctx.work / "results" / "exp2_runs.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["case_id", "cls", "subtype", "t1", "t2", "ablation", "j", "first_diagnosis", "diagnosis", "decision",
-                    "proposed_exact", "admitted", "exact_repair", "cited_ok", "verified", "sandbox_success"])
+        w.writerow(["case_id", "source", "cls", "subtype", "t1", "t2", "ablation", "j", "first_diagnosis", "diagnosis",
+                    "decision", "proposed_exact", "admitted", "exact_repair", "writes_key", "cited_ok", "verified",
+                    "kg_supported", "sandbox_success"])
         for r in runs:
-            w.writerow([r["case_id"], r["cls"], r["subtype"], r["t1"], r["t2"], r["ablation"], r["j"], r["first"]["diagnosis"],
-                        r["diagnosis"], (r["second"] or {}).get("decision", ""), r["_exact_first"], r["admitted"], r["_repaired"],
-                        r["cited_ok"], r["verified"], (r.get("tool") or {}).get("success", "")])
+            w.writerow([r["case_id"], cases[r["case_id"]].get("source", "kqapro"), r["cls"], r["subtype"], r["t1"], r["t2"],
+                        r["ablation"], r["j"], r["first"]["diagnosis"], r["diagnosis"], (r["second"] or {}).get("decision", ""),
+                        r["_exact_first"], r["admitted"], r["_repaired"], r["_writes_key"], r["cited_ok"], r["verified"],
+                        r.get("kg_supported"), (r.get("tool") or {}).get("success", "")])
     (ctx.work / "results" / "exp2_report.md").write_text("\n\n".join(parts) + "\n", encoding="utf-8")
     write_json(S, ctx.work / "results" / "exp2_summary.json")
     print(f"[analyze] wrote {ctx.work / 'results' / 'exp2_report.md'}")

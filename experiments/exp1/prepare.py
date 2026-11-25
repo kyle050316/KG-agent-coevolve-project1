@@ -50,9 +50,10 @@ def stage_region(ctx: Context) -> None:
     qs = ctx.questions("train") + ctx.questions("val")
     region = select_regions(ctx.gs, words, concept=c["concept"], n_a=c["n_a"], n_b=c["n_b"], min_facts=c["min_facts"],
                             min_page_words=c["min_page_words"], seed=ctx.cfg["seed"], questions=qs,
-                            min_questions_b=c.get("min_questions_b", 3))
+                            min_questions_b=c.get("min_questions_b", 3), n_b_extra=c.get("n_b_extra", 0))
     write_json(region, ctx.data / "region.json")
-    print(f"[region] pool={region['pool_size']} A={len(region['A'])} B={len(region['B'])}")
+    print(f"[region] pool={region['pool_size']} A={len(region['A'])} B={len(region['B'])} "
+          f"(core {len(region['B_core'])}, B candidates {region['b_candidates']})")
 
 
 def stage_passages(ctx: Context) -> None:

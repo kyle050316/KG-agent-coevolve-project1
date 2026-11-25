@@ -44,6 +44,7 @@ region:
   min_facts: 8
   min_page_words: 150
   min_questions_b: 3
+  n_b_extra: 0                       # more B entities, added after A and the first n_b (configs/exp2.yaml)
 
 support:
   audit_n: 50                        # human precision check of S (target precision >= 95%)
@@ -77,13 +78,18 @@ exp1:
   audit: {e3_n: 60}                  # optional human audit of the judge
 
 exp2:
-  # Three classes: missing_fact, wrong_fact (one sandboxed defect on a gold-path fact) and non_kg.
+  # Case classes: missing_fact, wrong_fact (one sandboxed defect on a gold-path fact), non_kg, and from Exp 1
+  # Challenger tasks bad_key (wrong key, KG right); the Curator diagnoses one of the four.
   # Triggers: T1 = Solver answer stably wrong; T2 = Solver KG execution stably misses the answer key.
   pool_size: 1000                    # KQA Pro questions on region B entities run on G*
   k: 4                               # Solver samples per question / case for stable labels
   stable_hi: 0.75                    # stably correct: >= 3/4
   stable_lo: 0.25                    # stably wrong:   <= 1/4
   targets: {missing_fact: 100, wrong_fact: 100, non_kg: 100}
+  challenger_cases:                  # cases from Exp 1 Mode A tasks, whose keys can be wrong (bad_key etc.)
+    sources: [{work_dir: null, seed: 0}]   # Exp 1 runs: work dir (exp1/tasks.jsonl, data/paths, data/gw; null = this
+                                     # one) and defect seed
+    n_per_class: 30                  # per kind: bad_key, key and KG wrong, key right and KG wrong (control)
   ablations: [full, no_tool]         # full = diagnose -> sandbox re-run as a tool -> commit/revise/withdraw
   ablation_n: 100                    # stratified cases for ablations other than full
   samples: 1                         # Curator seeds for the full ablation

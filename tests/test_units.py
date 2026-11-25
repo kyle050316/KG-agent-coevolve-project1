@@ -124,3 +124,65 @@ def test_discovery_categories(store):
     # already in Gw / unresolvable key -> other; right key, wrong value -> located_only; second hit with a wrong label
     assert cats == ["hit", "other", "other", "located_only", "hit"]
     assert sc["defects"][0]["detected"] and sc["defects"][0]["label_ok"]
+
+
+def test_region_b_extra_keeps_a_and_core_b(monkeypatch):
+    """Extra region-B entities are added after A and the first n_b B entities, so Exp 1 data stay valid."""
+    from kgcoevo.data import region as R
+
+    class Stub:
+        name_to_ids = {f"N{i}": [f"E{i}"] for i in range(40)}
+
+        def entities_with_concept(self, concept):
+            return [f"E{i}" for i in range(40)]
+
+        def facts_of(self, eid, kinds):
+            return list(range(10))
+
+        def rel_in(self, eid):
+            return []
+
+    monkeypatch.setattr(R, "find_prefix", lambda store, eid: [])
+    words = {f"E{i}": 200 + 37 * i for i in range(40)}
+    qs = [{"program": [{"function": "Find", "inputs": [f"N{i}"]}]} for i in range(40) for _ in range(3) if i % 4]
+    kw = dict(n_a=5, n_b=5, min_facts=8, min_page_words=150, seed=0, questions=qs, min_questions_b=3)
+    base = R.select_regions(Stub(), words, **kw)
+    ext = R.select_regions(Stub(), words, n_b_extra=8, **kw)
+    assert ext["A"] == base["A"] and ext["B_core"] == base["B"]
+    assert set(base["B"]) < set(ext["B"]) and len(ext["B"]) == 13 and not set(ext["A"]) & set(ext["B"])
+    assert all(int(e[1:]) % 4 for e in ext["B"])  # every B entity has KQA Pro questions
+
+
+def test_two_sided_gate_blocks_an_edit_to_a_wrong_key(store, executor):
+    """An edit that the cited item supports is still blocked when a shown item states the replaced value."""
+    import asyncio
+    import json
+    import re
+    from types import SimpleNamespace
+
+    from experiments.exp2.run import source_gate
+    from kgcoevo.agents.curator import build_edit
+    from kgcoevo.eval.checks import answer_forms
+    from kgcoevo.eval.compare import mentions
+    from kgcoevo.llm.client import MockLLM
+
+    def judge(msgs, seed):
+        text = msgs[-1]["content"]
+        passage = text.split('"""')[1]
+        value = re.split(r" is |: ", text.split("Claim: ")[1].split("\n")[0])[-1].rstrip(".")
+        return json.dumps({"entails": any(mentions(passage, f) for f in answer_forms(value))})
+
+    js = {"op": "update", "subject": "Barack Obama", "key": "date of birth", "old_value": "1961-08-04",
+          "new_value": "1900-01-01", "evidence_id": "p1"}
+    edit, err = build_edit(executor, store.name_to_ids, [], js, prefer=[])
+    assert edit is not None, err
+    p1 = "A tabloid claimed that he was born on 1 January 1900."
+    p2 = "Obama was born on August 4, 1961, in Honolulu."
+
+    def gate(shown, js_edit=js):
+        return asyncio.run(source_gate(SimpleNamespace(gs=store), MockLLM(judge), executor, [], edit, js_edit, shown, {}))
+
+    blocked = gate({"p1": p1, "p2": p2})
+    assert blocked["verified"] and blocked["kg_supported"] and not blocked["admitted"]
+    assert gate({"p1": p1})["admitted"]  # nothing shown states the replaced value
+    assert not gate({"p2": p2}, {**js, "evidence_id": "p3"})["admitted"]  # cites an item that was not shown
