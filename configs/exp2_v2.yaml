@@ -1,0 +1,15 @@
+# Exp 2, Curator v2 on the same cases as configs/exp2.yaml (copy exp2/{pool,pool_solver,case_solver,cases}.jsonl
+# from runs/exp2 into runs/exp2_v2/exp2 and run only the curator, locality and analysis stages).
+# Changes to the Curator: the task program is shown step by step on the case KG; single-valued keys are marked
+# (the model chooses add or update; no rewriting of its output); evidence also comes from the pages of the
+# entities the task program reaches, queried with the path keys and both candidate values; relation claims for
+# the verifier read "The <key> of <subject> is <object>."; 5 sampled runs per case, aggregated in the analysis.
+extends: exp2.yaml
+paths:
+  work_dir: runs/exp2_v2
+exp2:
+  samples: 5
+  ablations: [full]                  # the tool ablation (no_tool) changed little in v1
+  evidence_k: 10
+llm:
+  curator: {temperature: 0.7, top_p: 0.8, top_k: 20, presence_penalty: 0.0}   # sampled (model-card non-thinking values)

@@ -158,6 +158,14 @@ fact in S, so the documents can back the KG side (otherwise G\* itself is someti
      independent verifier says the passage states the new fact, **and the verifier finds no shown passage
      stating the value the edit replaces** (for an add: an existing value of a single-valued key).
      Deletions are never admitted.
+* **Curator v2** (`configs/exp2_v2.yaml`, same cases; first results in `docs/results/exp2_results.md`):
+  the task program is shown step by step on the case KG (an empty step shows where a missing edge
+  breaks); single-valued keys are marked, and the model chooses add or update (its output is not
+  rewritten); evidence also comes from the pages of the entities the task program reaches, queried with
+  the path keys and both candidate values (no defect information); relation claims read "The <key> of
+  <subject> is <object>."; 5 sampled runs per case, aggregated offline (sample 0, majority, best-of-N
+  through the gate, m-of-N consensus). Offline, the gold passage is retrieved for 110/151 flagged KQA Pro
+  KG cases instead of 61/151.
 * **Ablations** (paired, on a stratified subset): `no_tool` (turn 1 is final); `no_docs` (extended).
 * **Metrics** (all edit scoring is exact, against the defect log and G\*):
   * **Primary:** admitted exact repair, separately for missing and wrong facts and for visible and silent cases.

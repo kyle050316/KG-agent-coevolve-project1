@@ -6,7 +6,9 @@ can be wrong, and so can the KG. Only the evidence decides which one is right.
 ## Task
 Question: {{question}}
 Answer key (from the task generator; it can be wrong): {{answer_key}}
-The task's own program run on the current KG returns: {{kg_answer}}
+The task's own program, executed step by step on the current KG (step -> output):
+{{program_steps}}
+Final KG answer: {{kg_answer}}
 Does the KG's answer match the answer key? {{kg_match}}
 Why it was flagged: {{trigger}}
 
@@ -43,7 +45,8 @@ Why it was flagged: {{trigger}}
 - Propose an edit only for missing_fact or wrong_fact, and only if an evidence item explicitly states
   the new fact about this entity.
 - An edit changes exactly one fact ("add" for a missing fact, "update" for a wrong value). Use KG
-  names for entities and keys.
+  names for entities and keys. Keys marked [single-valued] hold one value per entity: if such a key
+  already has a wrong value, replace it with "update"; "add" would leave the wrong value in the KG.
 
 Return only a JSON object:
 {"diagnosis": "missing_fact|wrong_fact|bad_key|non_kg",

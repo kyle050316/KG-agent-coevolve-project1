@@ -94,7 +94,7 @@ def claim_text(ctx: Context, edit: Edit, value=None) -> str:
     """The fact the edit writes (or, with ``value``, the same subject/key with another value)."""
     v = edit.new_value if value is None else value
     if edit.kind == "rel":
-        return f"{ctx.gs.name(edit.subject)} has {edit.key}: {ctx.gs.name(v) if v in ctx.gs.entities else v}."
+        return f"The {edit.key} of {ctx.gs.name(edit.subject)} is {ctx.gs.name(v) if v in ctx.gs.entities else v}."
     return f"The {edit.key} of {ctx.gs.name(edit.subject)} is {value_str(v)}."
 
 
@@ -176,34 +176,40 @@ async def stage_curator(ctx: Context) -> None:
         seed = ctx.cfg["seed"] + 31 * j
         ex, edits = case_executor(ctx, case)
         traj = case["traj"]
-        ents = list(dict.fromkeys(linker(case["question"])))
+        path = C.path_entity_ids(ex, case["program_gold"], edits)  # entities the task program reaches on the case KG
+        ents = list(dict.fromkeys(path + linker(case["question"])))
         if traj.get("program"):
             tr = trace(ex, traj["program"], edits)
             if tr.ok:
                 ents += [e for e in tr.entities if e not in ents]
         ents = [e for e in ents if e in ctx.gs.entities][:8]
         kg_vals, kg_txt = kg_answer_text(ex.run(case["program_gold"], edits))  # the task's own program
+        differs = bool(kg_vals) and not match_any(case["key"], kg_vals)
+        task_keys = program_keys({"attempts": [{"program": case["program_gold"]}]})
         shown: list[str] = []
         if abl == "no_docs":
             evidence = "(none)"
         else:
             nbrs = sorted(C.live_neighbors(ex, edits, ents))  # case KG, so a deleted link is not followed
             k = conf["evidence_k"]
-            # retrieve for the key and for the KG's answer, so neither side is favoured
-            lists = [ctx.index.search(f"{case['question']} {case['key']}", k, qids=nbrs)]
-            if kg_vals and not match_any(case["key"], kg_vals):
-                lists.append(ctx.index.search(f"{case['question']} {' '.join(kg_vals)}", k, qids=nbrs))
+            vals = [case["key"]] + ([" ".join(kg_vals)] if differs else [])
+            # the pages of the path entities, queried with the path keys and both candidate values, then the
+            # question with each value over the linked entities and their neighbours; no side is favoured
+            lists = [ctx.index.search(f"{' '.join(sorted(task_keys))} {' '.join(vals)}", 3, qids=[e]) for e in path[:4]]
+            lists += [ctx.index.search(f"{case['question']} {v}", k, qids=nbrs) for v in vals]
             ps = interleave(lists, k)
             shown = [p.pid for p in ps]
             evidence = "\n".join(f"[{p.pid}] {p.text}" for p in ps) or "(no passages found)"
-        kg_match = ("yes" if match_any(case["key"], kg_vals) else "no") if kg_vals else "no (the KG returns no answer)"
-        first = await C.diagnose(llm, question=case["question"], answer_key=case["key"], kg_answer=kg_txt, kg_match=kg_match,
-                                 trigger=TRIGGER_TEXT["t1" if case["t1"] else "t2"],
+        kg_match = ("no" if differs else "yes") if kg_vals else "no (the KG returns no answer)"
+        first = await C.diagnose(llm, question=case["question"], answer_key=case["key"],
+                                 program_steps=C.program_steps_text(ex, case["program_gold"], edits, ctx.gs),
+                                 kg_answer=kg_txt, kg_match=kg_match, trigger=TRIGGER_TEXT["t1" if case["t1"] else "t2"],
                                  trajectory=C.render_trajectory(traj, ctx.gs),
-                                 kg_facts=C.live_facts_text(ex, edits, ents, names, focus_keys=program_keys(traj)),
+                                 kg_facts=C.live_facts_text(ex, edits, ents, names, focus_keys=program_keys(traj) | task_keys,
+                                                            functional=functional),
                                  evidence=evidence, seed=seed)
         rec = {"case_id": case["case_id"], "cls": case["cls"], "subtype": case["subtype"], "source": case.get("source", "kqapro"),
-               "t1": case["t1"], "t2": case["t2"], "ablation": abl, "j": j, "shown": shown, "kg_answer": kg_vals,
+               "t1": case["t1"], "t2": case["t2"], "ablation": abl, "j": j, "shown": shown, "kg_answer": kg_vals, "path": path,
                "first": {k: first[k] for k in ("diagnosis", "evidence_id", "located_fact", "edit", "confidence", "parse_ok")},
                "tool": None, "second": None}
         proposed = first["diagnosis"] in C.EDIT_DIAGNOSES and bool(first["edit"])

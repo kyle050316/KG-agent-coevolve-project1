@@ -230,7 +230,8 @@ def test_end_to_end(run_dir, capsys):
     a2.main()
     rep2 = (run_dir / "run" / "results" / "exp2_report.md").read_text()
     for section in ("Cases and trigger coverage", "Diagnosis and repair", "End-to-end", "Counterfactual tool",
-                    "Paired ablations", "Source gate", "Locality", "Baselines", "Cases from Exp 1 Challenger tasks"):
+                    "Paired ablations", "Source gate", "Locality", "Baselines", "Cases from Exp 1 Challenger tasks",
+                    "Repair funnel", "Sampling and aggregation"):
         assert section in rep2, section
 
 

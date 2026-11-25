@@ -196,3 +196,35 @@ def test_resolve_citation():
     assert resolve_citation("Q1", shown) == "Q1:4:0"   # the one shown passage of that entity
     assert resolve_citation("Q2", shown) == "Q2"       # ambiguous: stays unresolved
     assert resolve_citation("", shown) == ""
+
+
+def test_program_steps_and_path_entities(store, executor):
+    from kgcoevo.agents.curator import path_entity_ids, program_steps_text
+    from kgcoevo.kb.store import Edit
+
+    prog = [{"function": "Find", "inputs": ["Michelle Obama"]}, {"function": "Relate", "inputs": ["spouse", "forward"]},
+            {"function": "QueryAttr", "inputs": ["date of birth"]}]
+    steps = program_steps_text(executor, prog, [], store).split("\n")
+    assert steps[1].endswith("-> Barack Obama") and steps[2].endswith("-> 1961-08-04")
+    assert path_entity_ids(executor, prog, []) == ["Q13133", "Q76"]
+    f = store.find_fact("rel", "Q13133", "spouse", "Q76")
+    cut = [Edit.delete(store, f)]
+    steps = program_steps_text(executor, prog, cut, store).split("\n")
+    assert steps[1].endswith("-> nothing") and steps[2].endswith("-> nothing")  # the missing edge shows where it breaks
+    assert path_entity_ids(executor, prog, cut) == ["Q13133"]
+
+
+def test_aggregate_samples():
+    from experiments.exp2.analyze import aggregate
+
+    e1 = {"op": "update", "kind": "attr", "subject": "Q1", "key": "date of birth", "new_value": {"type": "date", "value": "1961-08-04"}}
+    e2 = {**e1, "new_value": {"type": "date", "value": "1900-01-01"}}
+    s = [{"j": 0, "diagnosis": "bad_key", "final_edit": None, "admitted": False},
+         {"j": 1, "diagnosis": "wrong_fact", "final_edit": e1, "admitted": True},
+         {"j": 2, "diagnosis": "wrong_fact", "final_edit": e1, "admitted": False},
+         {"j": 3, "diagnosis": "wrong_fact", "final_edit": e2, "admitted": True}]
+    assert aggregate(s, "single") == {"diagnosis": "bad_key", "edit": None}
+    assert aggregate(s, "majority") == {"diagnosis": "wrong_fact", "edit": e1}   # e1 proposed twice, admitted once
+    assert aggregate(s, "any")["edit"] == e1
+    assert aggregate(s, "consensus", m=2)["edit"] == e1
+    assert aggregate(s, "consensus", m=3)["edit"] is None

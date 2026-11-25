@@ -132,6 +132,83 @@ def _same(a: str, b: str) -> bool:
     return answers_equal(a, b)
 
 
+ENTITY_STEPS = {"Find", "FindAll", "FilterConcept", "Relate"}
+
+
+def program_steps_text(executor: Executor, program: list[dict] | None, edits: list[Edit] | None,
+                       store, max_items: int = 5) -> str:
+    """The task program executed step by step on the current KG (each step: what it does -> its output).
+    Entity steps are shown as names (the prefix plus QueryName), value steps as values; an empty output is
+    shown as "nothing". This is execution output, available in the loop because the task program is known."""
+    from kgcoevo.kb.paths import describe_program
+
+    if not program:
+        return "(no program)"
+    lines = describe_program(store, program).split("\n")
+    out = []
+    for i, step in enumerate(program):
+        prefix = list(program[: i + 1])
+        if step["function"] in ENTITY_STEPS:
+            prefix.append({"function": "QueryName", "inputs": []})
+        res = executor.run(prefix, edits)
+        if not res.ok:
+            shown = f"ERROR {res.error}"
+        elif not res.answers:
+            shown = "nothing"
+        else:
+            more = f" (+{len(res.answers) - max_items} more)" if len(res.answers) > max_items else ""
+            shown = ", ".join(res.answers[:max_items]) + more
+        out.append(f"{_step_text(step, i, lines)} -> {shown}")
+    return "\n".join(out)
+
+
+def _step_text(step: dict, i: int, lines: list[str]) -> str:
+    """describe_program's line, with plain wording for the steps it leaves generic (Curator prompt only)."""
+    f, inp = step["function"], [str(x) for x in step.get("inputs", [])] + [""] * 2
+    if f == "QueryRelation":
+        return f"{i + 1}. Return the relation from the first entity to the second."
+    if f.startswith("Verify"):
+        op = {"=": "equals", "!=": "differs from", "<": "is less than", ">": "is greater than"}.get(inp[1], "equals")
+        return f"{i + 1}. Check whether the value {op} '{inp[0]}'."
+    if f == "What":
+        return f"{i + 1}. Return the name of the resulting entity."
+    return lines[i] if i < len(lines) else f"{i + 1}. {f}"
+
+
+def path_entity_ids(executor: Executor, program: list[dict] | None, edits: list[Edit] | None,
+                    limit: int = 6) -> list[str]:
+    """Entities reached by the task program on the current KG (Find / FilterConcept / Relate outputs)."""
+    from kgcoevo.kb.trace import dependencies
+
+    if not program:
+        return []
+    funcs = [s["function"] for s in program]
+    try:
+        deps = dependencies(funcs)
+    except ValueError:
+        return []
+    kb, mem, out = executor.kb, [], []
+    with executor.patched(edits):
+        for f, dep, step in zip(funcs, deps, program):
+            inp = [str(x) for x in step.get("inputs", [])] + [""] * 2
+            prev = set().union(*(mem[d] for d in dep)) if dep else set()
+            if f == "Find":
+                cur = set(kb.name_to_id.get(inp[0], []))
+            elif f == "FilterConcept":
+                members = set()
+                for cid in kb.name_to_id.get(inp[0], []):
+                    members.update(kb.concept_to_entity.get(cid, []))
+                cur = prev & members
+            elif f == "Relate":
+                cur = {kb.entities[e]["relations"][i]["object"] for e in prev
+                       for i in kb.relation_inv_index.get((inp[0], inp[1]), {}).get(e, [])}
+            else:
+                cur = prev
+            mem.append(cur)
+            out += sorted(e for e in cur if e in kb.entities and e not in out)
+    return out[:limit]
+
+
 def resolve_citation(cited: str, shown) -> str:
     """Evidence id as shown: exact, without brackets, or the one shown passage of a cited entity id
     (the model sometimes cites "Q123" for "Q123:4:0")."""
@@ -154,10 +231,11 @@ def render_trajectory(traj: dict | None, store) -> str:
     return "\n".join(lines)
 
 
-async def diagnose(llm, *, question: str, answer_key: str, kg_answer: str, kg_match: str, trigger: str,
-                   trajectory: str, kg_facts: str, evidence: str, seed: int | None = None) -> dict:
-    msgs = messages("curator", question=question, answer_key=answer_key, kg_answer=kg_answer, kg_match=kg_match,
-                    trigger=trigger, trajectory=trajectory, kg_facts=kg_facts, evidence=evidence)
+async def diagnose(llm, *, question: str, answer_key: str, program_steps: str, kg_answer: str, kg_match: str,
+                   trigger: str, trajectory: str, kg_facts: str, evidence: str, seed: int | None = None) -> dict:
+    msgs = messages("curator", question=question, answer_key=answer_key, program_steps=program_steps,
+                    kg_answer=kg_answer, kg_match=kg_match, trigger=trigger, trajectory=trajectory,
+                    kg_facts=kg_facts, evidence=evidence)
     raw = await llm.chat(msgs, seed=seed)
     js = extract_json(raw) or {}
     d = str(js.get("diagnosis", "")).strip().lower()
@@ -197,14 +275,16 @@ def live_neighbors(executor: Executor, edits: list[Edit] | None, eids: list[str]
 
 
 def live_facts_text(executor: Executor, edits: list[Edit] | None, eids: list[str], names: dict[str, str],
-                    per_entity: int = 40, focus_keys: set[str] | None = None) -> str:
+                    per_entity: int = 40, focus_keys: set[str] | None = None, functional: dict | None = None) -> str:
     """Current facts (attrs + outgoing relations, with qualifiers) of ``eids`` on the patched KG.
 
-    Facts whose key appears in ``focus_keys`` (keys used by the Solver's program) are listed first, so
-    the per-entity cap never hides them.
+    Facts whose key appears in ``focus_keys`` (keys used by the programs) are listed first, so the
+    per-entity cap never hides them. Keys that are single-valued in the KB schema (``functional``) are
+    marked "[single-valued]" (schema information; the model decides between add and update).
     """
     kb = executor.kb
     focus = focus_keys or set()
+    func = functional or {}
     lines = []
     with executor.patched(edits):
         for e in eids:
@@ -215,12 +295,13 @@ def live_facts_text(executor: Executor, edits: list[Edit] | None, eids: list[str
             for i, a in enumerate(ent["attributes"]):
                 if i in kb.attribute_inv_index.get(a["key"], {}).get(e, []):
                     q = "; ".join(f"{k}: {', '.join(str(v) for v in vs)}" for k, vs in a["qualifiers"].items())
-                    rows.append((a["key"], f"{ent['name']} | {a['key']}: {a['value']}" + (f" ({q})" if q else "")))
+                    rows.append((a["key"], f"{ent['name']} | {a['key']}: {a['value']}" + (f" ({q})" if q else "")
+                                 + (" [single-valued]" if func.get(a["key"]) else "")))
             for i, r in enumerate(ent["relations"]):
                 if r["direction"] == "forward" and i in kb.relation_inv_index.get((r["relation"], "forward"), {}).get(e, []):
                     q = "; ".join(f"{k}: {', '.join(str(v) for v in vs)}" for k, vs in r["qualifiers"].items())
                     rows.append((r["relation"], f"{ent['name']} --{r['relation']}--> {names.get(r['object'], r['object'])}"
-                                 + (f" ({q})" if q else "")))
+                                 + (f" ({q})" if q else "") + (" [single-valued]" if func.get(r["relation"]) else "")))
             rows.sort(key=lambda x: x[0] not in focus)  # stable: original order within each group
             lines += [t for _, t in rows[:per_entity]]
     return "\n".join(lines) or "(no facts)"

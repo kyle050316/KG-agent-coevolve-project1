@@ -203,6 +203,32 @@ def surface_baseline(cases: list[dict]) -> dict:
     return {"auc": float(roc_auc_score(y, prob)), "n": len(cases)}
 
 
+# -- sampling: aggregate N Curator samples per case (offline, no extra LLM calls) ---------------------
+
+def _ck(e: dict | None):
+    import json as _json
+    return None if not e else (e["op"], e["kind"], e["subject"], e["key"], _json.dumps(e["new_value"], sort_keys=True))
+
+
+def aggregate(samples: list[dict], strategy: str, m: int = 1) -> dict:
+    """One decision from N samples of a case. Each sample already went through the source gate.
+    single: sample 0. majority: majority diagnosis, then its most frequent final edit (admitted if any sample
+    with that edit was admitted). any: the most frequent edit among the admitted ones (best-of-N through the
+    gate). consensus: an admitted edit that at least ``m`` samples gave as their final edit."""
+    diag = Counter(r["diagnosis"] for r in samples).most_common(1)[0][0]
+    if strategy == "single":
+        r = samples[0]
+        return {"diagnosis": r["diagnosis"], "edit": r["final_edit"] if r["admitted"] else None}
+    finals = Counter(_ck(r["final_edit"]) for r in samples if r["final_edit"])
+    admitted = {_ck(r["final_edit"]): r["final_edit"] for r in samples if r["admitted"]}
+    if strategy == "majority":
+        cands = Counter(_ck(r["final_edit"]) for r in samples if r["final_edit"] and r["diagnosis"] == diag)
+        top = cands.most_common(1)[0][0] if cands else None
+        return {"diagnosis": diag, "edit": admitted.get(top)}
+    ok = [k for k, _ in finals.most_common() if k in admitted and (strategy == "any" or finals[k] >= m)]
+    return {"diagnosis": diag, "edit": admitted[ok[0]] if ok else None}
+
+
 # -- report --------------------------------------------------------------------------------------
 
 def metric_row(ctx, resolver, cases, rs):
@@ -416,6 +442,52 @@ def main() -> None:
         vals = [100 * np.mean(v) for _, v in sorted(per_j.items())]
         parts.append(f"Seed spread of exact repair over KG runs (full): {', '.join(f'{v:.1f}' for v in vals)} "
                      f"(sd {np.std(vals, ddof=1):.1f}).")
+
+    # 7c. sampling and aggregation (full, the first n of the N samples per case)
+    N = conf["samples"]
+    if N > 1:
+        by_case = defaultdict(list)
+        for r in runs:
+            if r["ablation"] == "full":
+                by_case[r["case_id"]].append(r)
+        for v in by_case.values():
+            v.sort(key=lambda r: r["j"])
+        n_kq_kg = sum(c["cls"] in KG_CLASSES for cid, c in cases.items() if cid in kq)
+        wrong_key = [cid for cid, c in cases.items() if c.get("source") == "challenger" and not c.get("key_ok", True)]
+        agg_rows = []
+        ns = sorted({1, (N + 1) // 2, N})
+        plans = [("single", 1)] + [(s, None) for s in ("majority", "any")] + [("consensus", None)]
+        for n in ns:
+            for strat, _ in plans:
+                if n == 1 and strat != "single":
+                    continue
+                m = n // 2 + 1
+                dec = {cid: aggregate(v[:n], strat, m) for cid, v in by_case.items() if len(v) >= n}
+                kg_rep = sum(exact_repair(d["edit"], cases[cid].get("defect")) for cid, d in dec.items()
+                             if cid in kq and cases[cid]["cls"] in KG_CLASSES)
+                nk = [cid for cid in dec if cases[cid]["cls"] in NON_KG]
+                adm_kq = [d["edit"] for cid, d in dec.items() if cid in kq and d["edit"]]
+                kq_flag = [cid for cid in dec if cid in kq]
+                bk = [cid for cid in dec if cases[cid]["cls"] == "bad_key"]
+                ctrl = [cid for cid in dec if cases[cid]["subtype"] == "challenger_key_right"]
+                agg_rows.append([n, strat + (f" (>= {m}/{n})" if strat == "consensus" else ""),
+                                 f"{kg_rep}/{n_kq_kg}",
+                                 f"{sum(bool(dec[c]['edit']) for c in nk)}/{len(nk)}",
+                                 f"{sum(consistent_with_gstar(ctx, e) for e in adm_kq)}/{len(adm_kq)}",
+                                 f"{sum(writes_key(ctx, dec[c]['edit'], cases[c]['key']) for c in wrong_key if c in dec)}/"
+                                 f"{sum(c in dec for c in wrong_key)}",
+                                 f"{sum(exact_repair(dec[c]['edit'], cases[c].get('defect')) for c in ctrl)}/{len(ctrl)}",
+                                 f"{sum(dec[c]['diagnosis'] == 'bad_key' for c in bk)}/{len(bk)}",
+                                 f"{sum(dec[c]['diagnosis'] == 'bad_key' for c in dec if cases[c]['cls'] != 'bad_key')}/"
+                                 f"{sum(cases[c]['cls'] != 'bad_key' for c in dec)}",
+                                 f"{sum(dec[c]['diagnosis'] == cases[c]['cls'] for c in kq_flag)}/{len(kq_flag)}"])
+        S["sampling"] = agg_rows
+        parts += [f"## Sampling and aggregation (full, {N} samples per case)",
+                  "The other tables use sample 0. Here each flagged case gets one decision from its first n samples "
+                  "(see aggregate()). Exact repair is over all KQA Pro KG cases (unflagged ones count as not repaired).",
+                  _md(["n", "aggregation", "exact repair (KQA Pro KG)", "admitted edits on intact KG (non_kg + bad_key)",
+                       "admitted KQA Pro edits true in G*", "writes a wrong Challenger key", "control repaired",
+                       "bad_key detected", "bad_key on other cases", "diagnosis correct (KQA Pro)"], agg_rows)]
 
     # 8. locality / portability
     admitted = [r for r in full if r["admitted"]]
