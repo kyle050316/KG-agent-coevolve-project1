@@ -141,7 +141,7 @@ async def source_gate(ctx: Context, judge, ex, edits: list[Edit], edit: Edit | N
     1. the edit cites a shown item and the verifier says that item states the new fact;
     2. the verifier finds none of the shown items stating the value the edit replaces (if it did, the
        documents support the current KG, e.g. the task's answer key is the wrong side)."""
-    cited = str((js_edit or {}).get("evidence_id", "") or "")
+    cited = C.resolve_citation((js_edit or {}).get("evidence_id", ""), shown)
     out = {"cited_ok": bool(edit) and cited in shown, "verified": None, "kg_supported": None}
     if edit is not None and edit.op != "delete" and out["cited_ok"]:
         out["verified"] = (await verify_entailment(judge, shown[cited], claim_text(ctx, edit)))["entails"]
@@ -203,7 +203,7 @@ async def stage_curator(ctx: Context) -> None:
                                  evidence=evidence, seed=seed)
         rec = {"case_id": case["case_id"], "cls": case["cls"], "subtype": case["subtype"], "source": case.get("source", "kqapro"),
                "t1": case["t1"], "t2": case["t2"], "ablation": abl, "j": j, "shown": shown, "kg_answer": kg_vals,
-               "first": {k: first[k] for k in ("diagnosis", "located_fact", "edit", "confidence", "parse_ok")},
+               "first": {k: first[k] for k in ("diagnosis", "evidence_id", "located_fact", "edit", "confidence", "parse_ok")},
                "tool": None, "second": None}
         proposed = first["diagnosis"] in C.EDIT_DIAGNOSES and bool(first["edit"])
         edit, err = (C.build_edit(ex, ctx.gs.name_to_ids, edits, first["edit"], prefer=ents) if proposed
@@ -229,6 +229,7 @@ async def stage_curator(ctx: Context) -> None:
                 final_edit, err = C.build_edit(ex, ctx.gs.name_to_ids, edits, final_js, prefer=ents)
                 rec["revised_edit_error"] = err
         rec["diagnosis"] = diagnosis
+        rec["diag_cited"] = C.resolve_citation(first["evidence_id"], shown) in shown  # e.g. bad_key backed by an item
         rec["final_edit"] = final_edit.to_json() if final_edit else None
         texts = {pid: ctx.index.by_id[pid].text for pid in shown if pid in ctx.index.by_id}
         rec.update(await source_gate(ctx, judge, ex, edits, final_edit, final_js, texts, functional))

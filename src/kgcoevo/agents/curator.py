@@ -132,6 +132,16 @@ def _same(a: str, b: str) -> bool:
     return answers_equal(a, b)
 
 
+def resolve_citation(cited: str, shown) -> str:
+    """Evidence id as shown: exact, without brackets, or the one shown passage of a cited entity id
+    (the model sometimes cites "Q123" for "Q123:4:0")."""
+    c = str(cited or "").strip().strip("[]").strip()
+    if c in shown:
+        return c
+    hits = [pid for pid in shown if pid.startswith(c + ":")] if c else []
+    return hits[0] if len(hits) == 1 else c
+
+
 def render_trajectory(traj: dict | None, store) -> str:
     if not traj:
         return "(not available)"
@@ -152,6 +162,7 @@ async def diagnose(llm, *, question: str, answer_key: str, kg_answer: str, trigg
     js = extract_json(raw) or {}
     d = str(js.get("diagnosis", "")).strip().lower()
     return {"diagnosis": d if d in DIAGNOSES else "invalid", "located_fact": js.get("located_fact"),
+            "evidence_id": str(js.get("evidence_id", "") or ""),
             "edit": js.get("edit") if isinstance(js.get("edit"), dict) else None, "confidence": js.get("confidence"),
             "rationale": js.get("rationale", ""), "parse_ok": bool(js), "raw": raw, "_messages": msgs}
 

@@ -426,12 +426,12 @@ def main() -> None:
         w = csv.writer(f)
         w.writerow(["case_id", "source", "cls", "subtype", "t1", "t2", "ablation", "j", "first_diagnosis", "diagnosis",
                     "decision", "proposed_exact", "admitted", "exact_repair", "writes_key", "cited_ok", "verified",
-                    "kg_supported", "sandbox_success"])
+                    "kg_supported", "diag_cited", "sandbox_success"])
         for r in runs:
             w.writerow([r["case_id"], cases[r["case_id"]].get("source", "kqapro"), r["cls"], r["subtype"], r["t1"], r["t2"],
                         r["ablation"], r["j"], r["first"]["diagnosis"], r["diagnosis"], (r["second"] or {}).get("decision", ""),
                         r["_exact_first"], r["admitted"], r["_repaired"], r["_writes_key"], r["cited_ok"], r["verified"],
-                        r.get("kg_supported"), (r.get("tool") or {}).get("success", "")])
+                        r.get("kg_supported"), r.get("diag_cited"), (r.get("tool") or {}).get("success", "")])
     (ctx.work / "results" / "exp2_report.md").write_text("\n\n".join(parts) + "\n", encoding="utf-8")
     write_json(S, ctx.work / "results" / "exp2_summary.json")
     print(f"[analyze] wrote {ctx.work / 'results' / 'exp2_report.md'}")

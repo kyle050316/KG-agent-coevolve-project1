@@ -186,3 +186,13 @@ def test_two_sided_gate_blocks_an_edit_to_a_wrong_key(store, executor):
     assert blocked["verified"] and blocked["kg_supported"] and not blocked["admitted"]
     assert gate({"p1": p1})["admitted"]  # nothing shown states the replaced value
     assert not gate({"p2": p2}, {**js, "evidence_id": "p3"})["admitted"]  # cites an item that was not shown
+
+
+def test_resolve_citation():
+    from kgcoevo.agents.curator import resolve_citation
+    shown = ["Q1:4:0", "Q2:1:0", "Q2:3:0"]
+    assert resolve_citation("Q1:4:0", shown) == "Q1:4:0"
+    assert resolve_citation("[Q1:4:0]", shown) == "Q1:4:0"
+    assert resolve_citation("Q1", shown) == "Q1:4:0"   # the one shown passage of that entity
+    assert resolve_citation("Q2", shown) == "Q2"       # ambiguous: stays unresolved
+    assert resolve_citation("", shown) == ""

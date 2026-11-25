@@ -21,7 +21,8 @@ Why it was flagged: {{trigger}}
 ## Diagnosis options
 - "missing_fact": a fact needed for the answer is absent from the KG, and the evidence states it.
 - "wrong_fact": a KG fact on the path has a wrong value, and the evidence states the correct one.
-- "bad_key": the answer key is wrong; the evidence supports the current KG value.
+- "bad_key": the answer key is wrong: the KG returns a value, and an evidence item explicitly states
+  that value for this entity (cite it in "evidence_id").
 - "non_kg": the KG and the answer key agree, or nothing points to a KG fault; the Solver failed or
   bypassed the KG for another reason (wrong program, reasoning, formatting).
 
@@ -32,6 +33,9 @@ Why it was flagged: {{trigger}}
   * the evidence states a third value -> the KG is at fault; edit it to the value the evidence states,
     not to the answer key;
   * the evidence states neither -> no edit (pick the most likely diagnosis, "edit": null).
+- "bad_key" needs a KG value and an evidence item stating it. If the KG returns no answer, it is not
+  bad_key. A KG answer that differs from the key is not a reason by itself: every wrong or missing KG
+  fact looks like that.
 - The answer key is never evidence. Never change the KG just to make the answer key come out.
 - Propose an edit only for missing_fact or wrong_fact, and only if an evidence item explicitly states
   the new fact about this entity.
@@ -40,6 +44,7 @@ Why it was flagged: {{trigger}}
 
 Return only a JSON object:
 {"diagnosis": "missing_fact|wrong_fact|bad_key|non_kg",
+ "evidence_id": "<id of the item that decides the diagnosis, or empty>",
  "located_fact": {"subject": "<entity name>", "key": "<relation or attribute>"} or null,
  "edit": {"op": "add|update", "subject": "<entity name>", "key": "<key>", "old_value": "<current KG value or empty>", "new_value": "<value or entity name>", "evidence_id": "<id>", "quote": "<short quote>"} or null,
  "confidence": <number between 0 and 1>}
